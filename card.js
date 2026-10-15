@@ -182,9 +182,8 @@ window.FP2Geometry = (function () {
       // applyGridXMirror, never inside this function.
       return { gridX: ((-rawX + 400) / 800.0) * 14.0, gridY: (rawY / 800.0) * 14.0 };
     }
-    // Wall mounting mode: coordinate conversion not yet verified (out of scope). Placeholder
-    // preserved verbatim from drawTargets.
-    return { gridX: rawX * 0.01, gridY: rawY * 0.01 };
+    // Wall mounting: sensor at top-center, X in [-400,+400] cm, Y in [0,800] cm
+    return { gridX: ((-rawX + 400) / 800.0) * 14.0, gridY: (rawY / 800.0) * 14.0 };
   }
 
   function canvasPosToGridCell(x, y, renderParams) {
