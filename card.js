@@ -181,9 +181,10 @@ window.FP2Geometry = (function () {
       // (RESEARCH Pattern 5 option a). leftRightReverse is applied separately via
       // applyGridXMirror, never inside this function.
       return { gridX: ((-rawX + 400) / 800.0) * 14.0, gridY: (rawY / 800.0) * 14.0 };
-    }
-    // Wall mounting: sensor at top-center, X in [-400,+400] cm, Y in [0,800] cm
-    return { gridX: ((-rawX + 400) / 800.0) * 14.0, gridY: (rawY / 800.0) * 14.0 };
+    }    
+    // Wall mounting: sensor at top-center (column 7), ~2.5 cm per unit,
+    // 20 units per 0.5 m cell, +X = viewer's left (measured by nzzane/esphome_fp2)
+    return { gridX: 7 - rawX / 20.0, gridY: rawY / 20.0 };
   }
 
   function canvasPosToGridCell(x, y, renderParams) {
