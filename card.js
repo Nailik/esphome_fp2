@@ -170,7 +170,7 @@ window.FP2Geometry = (function () {
 
   // --- Target/cell transforms (D-06/GEOM-03, bounds safety/ASVS V5) ---
 
-  function targetToGridXY(rawX, rawY, mountingPosition) {
+  function targetToGridXY(rawX, rawY, mountingPosition, unitsPerCell) {
     if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
       console.warn(`[FP2 Card] targetToGridXY: non-finite raw coordinate, returning grid origin`);
       return { gridX: 0, gridY: 0 };
@@ -182,9 +182,11 @@ window.FP2Geometry = (function () {
       // applyGridXMirror, never inside this function.
       return { gridX: ((-rawX + 400) / 800.0) * 14.0, gridY: (rawY / 800.0) * 14.0 };
     }    
-    // Wall mounting: sensor at top-center (column 7), ~2.5 cm per unit,
-    // 20 units per 0.5 m cell, +X = viewer's left (measured by nzzane/esphome_fp2)
-    return { gridX: 7 - rawX / 20.0, gridY: rawY / 20.0 };
+    // Wall mounting: sensor at top-center (column 7), 0.5 m cells, +X = viewer's left.
+    // Units per cell depend on radar firmware: ~50 on FW 100 (1 cm/unit, measured),
+    // ~20 reported on FW 99 (2.5 cm/unit, nzzane/esphome_fp2).
+    const u = unitsPerCell || 50;
+    return { gridX: 7 - rawX / u, gridY: rawY / u };
   }
 
   function canvasPosToGridCell(x, y, renderParams) {
@@ -2619,7 +2621,7 @@ class AqaraFP2Card extends HTMLElement {
       // FP2Geometry.applyGridXMirror, immediately after the transform and
       // BEFORE the visible-range check, so the overlay never disagrees with
       // the painted grids (RESEARCH Pattern 4).
-      const raw = window.FP2Geometry.targetToGridXY(target.x, target.y, data.mountingPosition);
+      const raw = window.FP2Geometry.targetToGridXY(target.x, target.y, data.mountingPosition, this.config.wall_units_per_cell);
       const gridX = window.FP2Geometry.applyGridXMirror(raw.gridX, data.leftRightReverse);
       const gridY = raw.gridY;
 
@@ -2657,7 +2659,7 @@ class AqaraFP2Card extends HTMLElement {
       this.ctx.font = `bold ${Math.min(cellSize * 0.4, 12)}px sans-serif`;
       this.ctx.textAlign = "center";
       this.ctx.textBaseline = "middle";
-      this.ctx.fillText(target.id || "?", xPos, yPos);
+      this.ctx.fillText(target.id ?? "?", xPos, yPos);
     });
   }
 
