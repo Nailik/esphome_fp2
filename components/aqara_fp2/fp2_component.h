@@ -778,6 +778,10 @@ protected:
   static const uint32_t HEARTBEAT_TIMEOUT_MS = 15000;
   static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
   uint32_t last_work_mode_write_millis_{0};
+  // Last WORK_MODE written. The watchdog only runs in Zone Detection (3):
+  // switching to fall (8) or sleep (9) restarts the radar into other
+  // firmware, which must not be mistaken for a crash.
+  uint8_t work_mode_{3};
 
   // Configuration State
   uint8_t mounting_position_{0x01}; // Default Wall

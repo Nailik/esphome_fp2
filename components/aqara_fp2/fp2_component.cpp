@@ -402,6 +402,7 @@ void FP2Component::configure_sleep_mode(uint16_t width, uint16_t length, uint8_t
 
   enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, (uint8_t) 9);
   last_work_mode_write_millis_ = millis();
+  work_mode_ = 9;
 
   // PROTO-02: seed the heartbeat keepalive on sleep-mode entry. Safe to
   // leave after WORK_MODE=9 even if the radar restarts immediately — this
@@ -418,6 +419,10 @@ void FP2Component::set_work_mode(uint8_t mode) {
   ESP_LOGI(TAG, "Setting radar work mode candidate to %u", mode);
   enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, mode);
   last_work_mode_write_millis_ = millis();
+  work_mode_ = mode;
+  // Leaving sleep mode this way must stop the sleep heartbeat keepalive.
+  if (mode != 9)
+    sleep_mode_active_ = false;
 }
 
 void FP2Component::set_ai_target_filter_enabled(bool enabled) {
@@ -1396,7 +1401,7 @@ void FP2Component::loop() {
 }
 
 void FP2Component::check_heartbeat_watchdog_() {
-  if (!init_done_ || last_heartbeat_millis_ == 0)
+  if (!init_done_ || last_heartbeat_millis_ == 0 || work_mode_ != 3)
     return;
   if (millis() - last_heartbeat_millis_ > HEARTBEAT_TIMEOUT_MS) {
     restart_initialization_("heartbeat lost");
@@ -1496,6 +1501,7 @@ void FP2Component::check_initialization_() {
     // 1. Basic Settings
     enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, (uint8_t) 3);
     last_work_mode_write_millis_ = millis();
+    work_mode_ = 3;
     enqueue_command_(OpCode::WRITE, AttrId::MOTION_DETECT, (uint8_t) 1);
     enqueue_command_(OpCode::WRITE, AttrId::PRESENCE_DETECT, (uint8_t) 1);
     enqueue_command_(OpCode::WRITE, AttrId::MONITOR_MODE, (uint8_t) 0);
@@ -2101,7 +2107,8 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
             // The radar sends this once on boot. Seeing it long after we
             // configured it, without having changed the mode ourselves,
             // means the radar restarted behind our back.
-            if (init_done_ && millis() - last_work_mode_write_millis_ > WORK_MODE_REPORT_GRACE_MS) {
+            if (init_done_ && work_mode_ == 3 &&
+                millis() - last_work_mode_write_millis_ > WORK_MODE_REPORT_GRACE_MS) {
               restart_initialization_("radar rebooted");
             }
             break;
