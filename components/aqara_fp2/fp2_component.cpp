@@ -401,6 +401,7 @@ void FP2Component::configure_sleep_mode(uint16_t width, uint16_t length, uint8_t
   enqueue_command_(OpCode::WRITE, AttrId::SLEEP_MOUNT_POSITION, mount_position);
 
   enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, (uint8_t) 9);
+  last_work_mode_write_millis_ = millis();
 
   // PROTO-02: seed the heartbeat keepalive on sleep-mode entry. Safe to
   // leave after WORK_MODE=9 even if the radar restarts immediately — this
@@ -416,6 +417,7 @@ void FP2Component::configure_sleep_mode(uint16_t width, uint16_t length, uint8_t
 void FP2Component::set_work_mode(uint8_t mode) {
   ESP_LOGI(TAG, "Setting radar work mode candidate to %u", mode);
   enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, mode);
+  last_work_mode_write_millis_ = millis();
 }
 
 void FP2Component::set_ai_target_filter_enabled(bool enabled) {
@@ -676,6 +678,11 @@ void FP2Component::rehydrate_zone_registry_() {
   }
 }
 
+// 0x0152 type written for zones without a configured one. The stock app
+// writes one per zone (0x0a in the captured traces); the radar only reports
+// zones whose type it knows.
+static const uint8_t FP2_DEFAULT_ZONE_TYPE = 0x0a;
+
 // WR-02 fix (12-REVIEW #2): single source of truth for the zone_type
 // allowlist, previously duplicated verbatim as a chain of != comparisons in
 // both add_zone_at_runtime() and save_zone_to_sensor(). Must be kept in sync
@@ -691,9 +698,10 @@ static bool fp2_is_valid_zone_type_(int zone_type) {
 
 // ZONEMGMT-01 (12-02): add a new zone at runtime with zero YAML edits or
 // reflash. Define-before-activate ordering (12-RESEARCH.md Pattern 4):
-// ZONE_MAP/ZONE_SENSITIVITY/[DETECT_ZONE_TYPE]/ZONE_CLOSE_AWAY_ENABLE are
-// enqueued for the new ID BEFORE the rebuilt full ZONE_ACTIVATION_LIST - the
-// FIFO one-ACK-at-a-time command_queue_ guarantees this transmit order.
+// ZONE_MAP/ZONE_SENSITIVITY are enqueued for the new ID BEFORE the rebuilt
+// full ZONE_ACTIVATION_LIST, DETECT_ZONE_TYPE/ZONE_CLOSE_AWAY_ENABLE right
+// after it (stock order) - the FIFO one-ACK-at-a-time command_queue_
+// guarantees this transmit order.
 void FP2Component::add_zone_at_runtime(uint8_t zone_id, uint8_t sensitivity, int zone_type) {
   // CR-01 fix (12-REVIEW): hand off pending-state ownership to
   // pending_save_attr_ids_/save_failed_ now that this deferred call is
@@ -868,29 +876,20 @@ void FP2Component::add_zone_at_runtime(uint8_t zone_id, uint8_t sensitivity, int
                     (uint16_t)((zone_id << 8) | (sensitivity & 0xFF)));
   pending_save_attr_ids_.push_back(AttrId::ZONE_SENSITIVITY);
 
-  if (zone_type >= 0) {
-    enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE,
-                      (uint16_t)((zone_id << 8) | ((uint8_t) zone_type & 0xFF)));
-    pending_save_attr_ids_.push_back(AttrId::DETECT_ZONE_TYPE);
-  }
+  // ACTIVATE: rebuild the full 32-byte list from the now-updated zones_ -
+  // the same helper check_initialization_() uses (the single source of
+  // truth for "what is active now").
+  enqueue_command_blob2_(AttrId::ZONE_ACTIVATION_LIST, build_zone_activation_list_());
+  pending_save_attr_ids_.push_back(AttrId::ZONE_ACTIVATION_LIST);
+
+  // Zone type + close/away right after the activation list, like stock. A
+  // zone the radar has no type for is never reported, so always write one.
+  enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE,
+                    (uint16_t)((zone_id << 8) | resolve_zone_type_(zone_id, zone_type)));
+  pending_save_attr_ids_.push_back(AttrId::DETECT_ZONE_TYPE);
 
   enqueue_command_(OpCode::WRITE, AttrId::ZONE_CLOSE_AWAY_ENABLE, (uint16_t)((zone_id << 8) | 1));
   pending_save_attr_ids_.push_back(AttrId::ZONE_CLOSE_AWAY_ENABLE);
-
-  // ACTIVATE last: rebuild the full 32-byte list from the now-updated
-  // zones_ - mirrors check_initialization_()'s activation-rebuild loop
-  // exactly (the single source of truth for "what is active now").
-  std::vector<uint8_t> activations(32, 0);
-  for (const auto &z : zones_) {
-    // CR-01 fix (12-REVIEW iter2): zones_ now retains removed zones as
-    // inactive entries rather than erasing them - skip them so a
-    // deactivated zone is never re-activated on the radar by this rebuild.
-    if (!z->active)
-      continue;
-    activations[z->id] = z->id;
-  }
-  enqueue_command_blob2_(AttrId::ZONE_ACTIVATION_LIST, activations);
-  pending_save_attr_ids_.push_back(AttrId::ZONE_ACTIVATION_LIST);
 }
 
 // RENAME-01 (13.1.1-01): rename a runtime zone's display name. Pure NVS
@@ -996,13 +995,7 @@ void FP2Component::remove_zone_at_runtime(uint8_t zone_id) {
   zone->active = false;
 
   // UART sequence - DEACTIVATE first.
-  std::vector<uint8_t> activations(32, 0);
-  for (const auto &z : zones_) {
-    if (!z->active)
-      continue;
-    activations[z->id] = z->id;
-  }
-  enqueue_command_blob2_(AttrId::ZONE_ACTIVATION_LIST, activations);
+  enqueue_command_blob2_(AttrId::ZONE_ACTIVATION_LIST, build_zone_activation_list_());
   pending_save_attr_ids_.push_back(AttrId::ZONE_ACTIVATION_LIST);
 
   // CLEAR second (hygiene) - not load-bearing for correctness (the "define"
@@ -1187,12 +1180,12 @@ void FP2Component::save_zone_to_sensor(uint8_t zone_id, const std::string &grid_
                     (uint16_t)((zone_id << 8) | (sensitivity & 0xFF)));
   pending_save_attr_ids_.push_back(AttrId::ZONE_SENSITIVITY);
 
-  // 3. DETECT_ZONE_TYPE (0x0152), only if the caller set one.
-  if (zone_type >= 0) {
-    enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE,
-                      (uint16_t)((zone_id << 8) | ((uint8_t) zone_type & 0xFF)));
-    pending_save_attr_ids_.push_back(AttrId::DETECT_ZONE_TYPE);
-  }
+  // 3. DETECT_ZONE_TYPE (0x0152). The radar never reports a zone it has no
+  // type for, so an unset type falls back to the zone's compiled type or
+  // the default instead of being skipped.
+  enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE,
+                    (uint16_t)((zone_id << 8) | resolve_zone_type_(zone_id, zone_type)));
+  pending_save_attr_ids_.push_back(AttrId::DETECT_ZONE_TYPE);
 
   // 4. ZONE_CLOSE_AWAY_ENABLE (0x0153): UINT16 (High=ID, Low=1/enabled).
   // NOTE (D-04): the 32-byte auxiliary activation-list register is
@@ -1387,6 +1380,7 @@ void FP2Component::loop() {
 #endif
 
   check_initialization_();
+  check_heartbeat_watchdog_();
   process_command_queue_();
 
   // Release zone motion sensors once their debounce timeout expires.
@@ -1401,6 +1395,91 @@ void FP2Component::loop() {
   }
 }
 
+void FP2Component::check_heartbeat_watchdog_() {
+  if (!init_done_ || last_heartbeat_millis_ == 0)
+    return;
+  if (millis() - last_heartbeat_millis_ > HEARTBEAT_TIMEOUT_MS) {
+    restart_initialization_("heartbeat lost");
+  }
+}
+
+// Drop everything, reset the radar and let check_initialization_() run again
+// on the next radar frame. Used when the heartbeat stops or when the radar
+// announces a fresh boot (work_mode report) after we already configured it.
+void FP2Component::restart_initialization_(const char *reason) {
+  ESP_LOGW(TAG, "Radar re-initialization (%s)", reason);
+  // The queued writes are dropped below, so an open save batch can't finish.
+  if (!pending_save_attr_ids_.empty()) {
+    save_failed_ = true;
+    save_error_ = std::string("radar re-initialized (") + reason + ")";
+    pending_save_attr_ids_.clear();
+    save_batch_in_progress_ = false;
+  }
+  // The radar comes back in its default work mode; init writes Zone Detection.
+  sleep_mode_active_ = false;
+  if (this->operating_mode_select_ != nullptr) {
+    this->operating_mode_select_->publish_state(OPERATING_MODE_ZONE_DETECTION);
+  }
+  // Clears the queue and init state.
+  perform_reset_();
+}
+
+// Stock firmware sends these as REPORTs (op 5) right after the radar boots.
+void FP2Component::send_orientation_reports_() {
+  if (fp2_accel_ == nullptr) {
+    ESP_LOGW(TAG, "No accel configured - not reporting orientation to radar");
+    return;
+  }
+  uint8_t dir = (uint8_t) fp2_accel_->get_orientation();
+  uint16_t angle = (uint16_t) fp2_accel_->get_output_angle_z();
+  ESP_LOGI(TAG, "Reporting orientation to radar: direction=%u angle=%u", dir, angle);
+  FP2Command c1;
+  c1.type = OpCode::REPORT;
+  c1.attr_id = AttrId::DEVICE_DIRECTION;
+  c1.retry_count = 0;
+  c1.last_send_time = 0;
+  c1.data = {0x01, 0x43, 0x00, dir};
+  command_queue_.push_back(c1);
+  FP2Command c2;
+  c2.type = OpCode::REPORT;
+  c2.attr_id = AttrId::ANGLE_SENSOR_DATA;
+  c2.retry_count = 0;
+  c2.last_send_time = 0;
+  c2.data = {0x01, 0x20, 0x01, (uint8_t)(angle >> 8), (uint8_t) angle};
+  command_queue_.push_back(c2);
+}
+
+// 0x0202: 32-byte packed list of active zone ids. The stock trace with two
+// zones sends 00 01 02 00 ... - slot 0 is the global zone, then every zone
+// id in order with no gaps. Writing the ids at their own index instead
+// leaves a hole whenever a lower-numbered zone is missing, and the radar
+// then never reports the zones after it.
+std::vector<uint8_t> FP2Component::build_zone_activation_list_() const {
+  std::vector<uint8_t> activations(32, 0);
+  size_t slot = 1;
+  for (const auto &z : zones_) {
+    // zones_ retains removed zones as inactive entries - skip them so a
+    // deactivated zone is never re-activated on the radar by this rebuild.
+    // Id 0 is the global zone, already in slot 0.
+    if (!z->active || z->id == 0 || slot >= activations.size())
+      continue;
+    activations[slot++] = z->id;
+  }
+  return activations;
+}
+
+// Zone type to write to 0x0152: the requested one, else the zone's compiled
+// type, else the default. -1 = not set.
+uint8_t FP2Component::resolve_zone_type_(uint8_t zone_id, int zone_type) const {
+  if (zone_type >= 0)
+    return (uint8_t) zone_type;
+  for (const auto &z : zones_) {
+    if (z->active && z->id == zone_id && z->has_zone_type)
+      return z->zone_type;
+  }
+  return FP2_DEFAULT_ZONE_TYPE;
+}
+
 void FP2Component::check_initialization_() {
   if (init_done_)
     return;
@@ -1409,16 +1488,16 @@ void FP2Component::check_initialization_() {
     ESP_LOGI(TAG, "Radar traffic received. Starting initialization sequence...");
     init_done_ = true;
 
+    // 0. Like the stock firmware: tell the radar how it is mounted and read
+    //    its temperature before configuring anything.
+    send_orientation_reports_();
+    enqueue_read_(AttrId::TEMPERATURE);
+
     // 1. Basic Settings
     enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, (uint8_t) 3);
+    last_work_mode_write_millis_ = millis();
     enqueue_command_(OpCode::WRITE, AttrId::MOTION_DETECT, (uint8_t) 1);
     enqueue_command_(OpCode::WRITE, AttrId::PRESENCE_DETECT, (uint8_t) 1);
-    if (location_reporting_active_) {
-      enqueue_command_(OpCode::WRITE, AttrId::LOCATION_REPORT_ENABLE, true);
-      if (location_report_switch_ != nullptr) {
-        location_report_switch_->publish_state(true);
-      }
-    }
     enqueue_command_(OpCode::WRITE, AttrId::MONITOR_MODE, (uint8_t) 0);
     enqueue_command_(OpCode::WRITE, AttrId::LEFT_RIGHT_REVERSE,
                      (uint8_t)(left_right_reverse_ ? 2 : 0));
@@ -1434,7 +1513,7 @@ void FP2Component::check_initialization_() {
       effective_global_sensitivity = gov.presence_sensitivity;
     }
     enqueue_command_(OpCode::WRITE, AttrId::PRESENCE_DETECT_SENSITIVITY, effective_global_sensitivity);
-    enqueue_command_(OpCode::WRITE, AttrId::CLOSING_SETTING, (uint8_t) 1);
+    enqueue_command_(OpCode::WRITE, AttrId::CLOSING_SETTING, proximity_);
     enqueue_command_(OpCode::WRITE, AttrId::ZONE_CLOSE_AWAY_ENABLE, (uint16_t) 0x0001);
     // PROTO-03 (2026-07-14): 0x0121 is report-only (fall event, not a
     // boolean enable) as of this fix — there is no separate fall-detection
@@ -1447,12 +1526,12 @@ void FP2Component::check_initialization_() {
                     "0x0121 is fall-event-report-only. Fall events require WORK_MODE=8; "
                     "switch via the fp2_set_work_mode(8) diagnostic action.");
     }
-    if (has_fall_detection_sensitivity_) {
-      enqueue_command_(OpCode::WRITE, AttrId::FALL_SENSITIVITY, fall_detection_sensitivity_);
-    }
-    if (has_sleep_report_enable_) {
-      enqueue_command_(OpCode::WRITE, AttrId::SLEEP_REPORT_ENABLE, sleep_report_enable_);
-    }
+    // Stock always writes the fall sensitivity, even with fall detection off.
+    enqueue_command_(OpCode::WRITE, AttrId::FALL_SENSITIVITY, fall_detection_sensitivity_);
+    // Sleep monitoring is a radar MODE: while enabled the radar stops normal
+    // presence/target reporting, and it remembers the setting across resets.
+    // Always write it explicitly so a stale TRUE cannot linger.
+    enqueue_command_(OpCode::WRITE, AttrId::SLEEP_REPORT_ENABLE, sleep_report_enable_);
     if (has_posture_report_enable_) {
       enqueue_command_(OpCode::WRITE, AttrId::POSTURE_REPORT_ENABLE, posture_report_enable_);
     }
@@ -1463,17 +1542,22 @@ void FP2Component::check_initialization_() {
     enqueue_command_(OpCode::WRITE, AttrId::WALL_CORNER_POS, mounting_position_);
     enqueue_command_(OpCode::WRITE, AttrId::DWELL_TIME_ENABLE, (uint8_t)(dwell_time_enable_ ? 1 : 0));
     enqueue_command_(OpCode::WRITE, AttrId::WALK_DISTANCE_ENABLE, (uint8_t)(walking_distance_enable_ ? 1 : 0));
+    // The stock firmware never enables the thermodynamic chart, and radar
+    // FW 99 stops tracking while it is on - keep it off unless configured.
+    // Written explicitly so a TRUE left behind by older builds is cleared.
     enqueue_command_(OpCode::WRITE, AttrId::THERMO_EN, thermodynamic_chart_enable_);
     if (thermodynamic_chart_enable_) {
       enqueue_command_(OpCode::WRITE, AttrId::THERMO_DATA, (uint8_t) 1);
     }
 
-    // 2. Grids
+    // 2. Grids (stock always writes an interference map, all-zero if none)
     if (has_interference_grid_) {
       // 0x0110 Interference Source
       enqueue_command_blob2_(AttrId::INTERFERENCE_MAP,
                              std::vector<uint8_t>(interference_grid_.begin(),
                                                   interference_grid_.end()));
+    } else {
+      enqueue_command_blob2_(AttrId::INTERFERENCE_MAP, std::vector<uint8_t>(40, 0x00));
     }
     if (has_exit_grid_) {
       // 0x0109 Enter/Exit Label
@@ -1484,10 +1568,16 @@ void FP2Component::check_initialization_() {
       // 0x0107 Edge Label
       enqueue_command_blob2_(
           AttrId::EDGE_MAP, std::vector<uint8_t>(edge_grid_.begin(), edge_grid_.end()));
+    } else {
+      // The radar keeps the last edge map in its own flash (e.g. the room the
+      // Aqara app learned) and ignores targets in cells marked 1 (= edge /
+      // blocked). Always write one: all-zero = nothing blocked.
+      enqueue_command_blob2_(AttrId::EDGE_MAP, std::vector<uint8_t>(40, 0x00));
     }
 
     // 3. Zones
-    std::vector<uint8_t> activations(32, 0);
+    // Resolved zone types, written after the activation list like stock does.
+    std::vector<uint16_t> zone_type_vals;
     for (const auto &zone : zones_) {
       // CR-01 fix (12-REVIEW iter2): skip inactive (runtime-removed) zones -
       // possible in the rare case a remove happened before the very first
@@ -1526,26 +1616,27 @@ void FP2Component::check_initialization_() {
       uint16_t sens_val = (zone->id << 8) | (sensitivity & 0xFF);
       enqueue_command_(OpCode::WRITE, AttrId::ZONE_SENSITIVITY, sens_val);
 
-      // c. Send Zone Type (0x0152) if resolved: UINT16 (High=ID, Low=Type)
-      if (zone_type >= 0) {
-        uint16_t type_val = (zone->id << 8) | ((uint8_t) zone_type & 0xFF);
-        enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE, type_val);
-      }
-
-      activations[zone->id] = zone->id;
+      // c. Zone Type (0x0152): UINT16 (High=ID, Low=Type). The radar never
+      // reports a zone it has no type for, so fall back to the default.
+      uint8_t type = zone_type >= 0 ? (uint8_t) zone_type : FP2_DEFAULT_ZONE_TYPE;
+      zone_type_vals.push_back((uint16_t)((zone->id << 8) | type));
     }
 
-    enqueue_command_blob2_(AttrId::ZONE_ACTIVATION_LIST, activations);
+    enqueue_command_blob2_(AttrId::ZONE_ACTIVATION_LIST, build_zone_activation_list_());
 
-    for (const auto &zone : zones_) {
-        // CR-01 fix (12-REVIEW iter2): skip inactive (runtime-removed) zones -
-        // see the identical guard on the activation-list loop above.
-        if (!zone->active)
-          continue;
-        // Close/Away Enable default?
-        // Trace: 0x0153 Zone Close Away Enable.
-        // We can enable it by default for now or add config options later.
-        enqueue_command_(OpCode::WRITE, AttrId::ZONE_CLOSE_AWAY_ENABLE, (uint16_t)((zone->id << 8) | 1));
+    // Stock writes zone type + close/away per zone right after the activation list.
+    for (uint16_t type_val : zone_type_vals) {
+        uint8_t zone_id = type_val >> 8;
+        enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE, type_val);
+        enqueue_command_(OpCode::WRITE, AttrId::ZONE_CLOSE_AWAY_ENABLE, (uint16_t)((zone_id << 8) | 1));
+    }
+
+    // Location (target) reporting is remembered by the radar across resets,
+    // and a radar reset has been seen to clear it - which silently kills
+    // every target frame. Write it explicitly (on or off) on every init.
+    enqueue_command_(OpCode::WRITE, AttrId::LOCATION_REPORT_ENABLE, location_reporting_active_);
+    if (location_report_switch_ != nullptr) {
+      location_report_switch_->publish_state(location_reporting_active_);
     }
 
     if (debug_probe_reads_) {
@@ -1670,7 +1761,7 @@ void FP2Component::write_command_frame_(const FP2Command &cmd, bool track_timeou
   frame.push_back(0x55);  // Sync
   frame.push_back(0x00);  // Version High
   frame.push_back(0x01);  // Version Low
-  frame.push_back(next_tx_seq++);
+  frame.push_back(cmd.seq >= 0 ? (uint8_t) cmd.seq : next_tx_seq++);
   frame.push_back((uint8_t)cmd.type);
 
   uint16_t len = cmd.data.size();
@@ -1739,12 +1830,13 @@ void FP2Component::send_next_command_() {
   }
 }
 
-void FP2Component::send_ack_(AttrId attr_id) {
+void FP2Component::send_ack_(AttrId attr_id, uint8_t seq) {
   FP2Command cmd;
   cmd.type = OpCode::ACK;
   cmd.attr_id = attr_id;
   cmd.retry_count = 0;
   cmd.last_send_time = 0;
+  cmd.seq = seq;  // echo the radar's sequence number, as the stock ESP does
 
   // ACK payload: [SubID 2 bytes] [DataType VOID]
   cmd.data.push_back((((uint16_t) attr_id) >> 8) & 0xFF);
@@ -1755,11 +1847,12 @@ void FP2Component::send_ack_(AttrId attr_id) {
   write_command_frame_(cmd, false);
 }
 
-void FP2Component::send_reverse_response_(AttrId attr_id, uint8_t byte_val) {
+void FP2Component::send_reverse_response_(AttrId attr_id, uint8_t byte_val, uint8_t seq) {
   FP2Command cmd;
   cmd.type = OpCode::READ;  // Reverse Read Response uses READ opcode
   cmd.attr_id = attr_id;
   cmd.retry_count = 0;
+  cmd.seq = seq;
 
   // Payload: [SubID 2 bytes] [DataType UINT8] [Value 1 byte]
   cmd.data.push_back((((uint16_t) attr_id) >> 8) & 0xFF);
@@ -1768,6 +1861,23 @@ void FP2Component::send_reverse_response_(AttrId attr_id, uint8_t byte_val) {
   cmd.data.push_back(byte_val);
 
   // The radar is synchronously waiting for this reverse-read response.
+  write_command_frame_(cmd, false);
+}
+
+void FP2Component::send_reverse_response_(AttrId attr_id, uint16_t word_val, uint8_t seq) {
+  FP2Command cmd;
+  cmd.type = OpCode::READ;  // Reverse Read Response uses READ opcode
+  cmd.attr_id = attr_id;
+  cmd.retry_count = 0;
+  cmd.seq = seq;
+
+  // Payload: [SubID 2 bytes] [DataType UINT16] [Value 2 bytes]
+  cmd.data.push_back((((uint16_t) attr_id) >> 8) & 0xFF);
+  cmd.data.push_back(((uint16_t) attr_id) & 0xFF);
+  cmd.data.push_back(0x01);  // DataType: UINT16
+  cmd.data.push_back((word_val >> 8) & 0xFF);
+  cmd.data.push_back(word_val & 0xFF);
+
   write_command_frame_(cmd, false);
 }
 
@@ -1940,10 +2050,25 @@ void FP2Component::handle_ack_(AttrId attr_id) {
   }
 }
 
+static const char *presence_event_name(uint8_t v) {
+  // Same enum Aqara uses for presence_event on the FP1/FP2 (0x0103 report).
+  switch (v) {
+    case 0: return "enter";
+    case 1: return "leave";
+    case 2: return "left_enter";
+    case 3: return "right_leave";
+    case 4: return "right_enter";
+    case 5: return "left_leave";
+    case 6: return "approach";
+    case 7: return "away";
+    default: return "unknown";
+  }
+}
+
 void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &payload) {
   // Send ACK for all reports except heartbeat
   if (attr_id != AttrId::RADAR_SW_VERSION) {
-    send_ack_(attr_id);
+    send_ack_(attr_id, rx_seq_);
   }
 
   // Process specific report types
@@ -1973,6 +2098,12 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
         if (payload.size() == 4 && payload[2] == 0x00) {
             ESP_LOGI(TAG, "Received work mode report: %u", payload[3]);
             publish_radar_debug_("radar_report", attr_id, payload);
+            // The radar sends this once on boot. Seeing it long after we
+            // configured it, without having changed the mode ourselves,
+            // means the radar restarted behind our back.
+            if (init_done_ && millis() - last_work_mode_write_millis_ > WORK_MODE_REPORT_GRACE_MS) {
+              restart_initialization_("radar rebooted");
+            }
             break;
         }
         break;
@@ -2004,12 +2135,17 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
         break;
 
     case AttrId::MOTION_DETECT:
+        // Not a boolean: presence-event enum. Even values are arrivals
+        // (enter/left_enter/right_enter/approach), odd are departures.
         if (payload.size() == 4 && payload[2]  == 0x00) {
-            uint8_t state = payload[3];
-            if (global_motion_sensor_ != nullptr) {
-              global_motion_sensor_->publish_state(state != 0);
+            uint8_t event = payload[3];
+            ESP_LOGI(TAG, "Presence event: %u (%s)", event, presence_event_name(event));
+            if (presence_event_sensor_ != nullptr) {
+              presence_event_sensor_->publish_state(presence_event_name(event));
             }
-            ESP_LOGI(TAG, "Received global motion report: %u", state);
+            if (global_motion_sensor_ != nullptr) {
+              global_motion_sensor_->publish_state((event & 0x01) == 0);
+            }
             break;
         }
         break;
@@ -2434,8 +2570,8 @@ void FP2Component::handle_reverse_read_request_(AttrId attr_id) {
   switch (attr_id) {
     case AttrId::DEVICE_DIRECTION:  // device_direction
       if (fp2_accel_ != nullptr) {
-        send_reverse_response_(attr_id, (uint8_t)fp2_accel_->get_orientation());
-        ESP_LOGD(TAG, "Sending Device Direction: %d", fp2_accel_->get_orientation());
+        send_reverse_response_(attr_id, (uint8_t)fp2_accel_->get_orientation(), rx_seq_);
+        ESP_LOGD(TAG, "Sending Device Direction: %d (seq %u)", (int) fp2_accel_->get_orientation(), rx_seq_);
       } else {
         ESP_LOGW(TAG, "Reverse Query for Device Direction but no accel configured - ignoring");
         publish_radar_debug_("reverse_query_no_accel", attr_id, std::vector<uint8_t>{});
@@ -2444,8 +2580,9 @@ void FP2Component::handle_reverse_read_request_(AttrId attr_id) {
 
     case AttrId::ANGLE_SENSOR_DATA:  // angle_sensor_data
       if (fp2_accel_ != nullptr) {
-        uint8_t angle = fp2_accel_->get_output_angle_z();
-        send_reverse_response_(attr_id, angle);
+        // UINT16 in the stock traces
+        uint16_t angle = (uint16_t) fp2_accel_->get_output_angle_z();
+        send_reverse_response_(attr_id, angle, rx_seq_);
         ESP_LOGD(TAG, "Sending Angle Sensor Data: %d", angle);
       } else {
         ESP_LOGW(TAG, "Reverse Query for Angle Sensor Data but no accel configured - ignoring");

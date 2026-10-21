@@ -53,6 +53,8 @@ CONF_FP2_ID = "fp2_id"
 
 CONF_MOUNTING_POSITION = "mounting_position"
 CONF_LEFT_RIGHT_REVERSE = "left_right_reverse"
+# 0x0106 approach/away distance ("Proximity" in the Aqara app)
+CONF_PROXIMITY = "proximity"
 CONF_INTERFERENCE_GRID = "interference_grid"
 CONF_EXIT_GRID = "exit_grid"
 CONF_EDGE_GRID = "edge_grid"
@@ -101,6 +103,8 @@ CONF_FALL_OVERTIME = "fall_overtime"
 CONF_SLEEP_STATE = "sleep_state"
 CONF_SLEEP_EVENT = "sleep_event"
 CONF_TARGET_POSTURE = "target_posture"
+# 0x0103 presence-event enum (enter/leave/approach/away/...)
+CONF_PRESENCE_EVENT = "presence_event"
 CONF_PRESENCE = "presence"
 CONF_GLOBAL_ZONE = "global_zone"
 CONF_RADAR_SOFTWARE_VERSION = "radar_software_version"
@@ -118,6 +122,12 @@ MOUNTING_POSITIONS = {
     "wall": 0x01,
     "left_corner": 0x02,
     "right_corner": 0x03,
+}
+
+PROXIMITY_LEVELS = {
+    "far": 0,
+    "medium": 1,
+    "close": 2,
 }
 
 SENSITIVITY_LEVELS = {
@@ -246,11 +256,13 @@ CONFIG_SCHEMA = (
             cv.Required("accel"): cv.use_id(AqaraFP2Accel),
 
             cv.Optional(CONF_RADAR_RESET_PIN): pins.gpio_output_pin_schema,
-            cv.Optional(CONF_MOUNTING_POSITION, default="left_corner"): cv.enum(
+            # Radar FW 99 never starts tracking in the corner modes; wall works.
+            cv.Optional(CONF_MOUNTING_POSITION, default="wall"): cv.enum(
                 MOUNTING_POSITIONS
             ),
 
             cv.Optional(CONF_LEFT_RIGHT_REVERSE, default=False): cv.boolean,
+            cv.Optional(CONF_PROXIMITY, default="medium"): cv.enum(PROXIMITY_LEVELS),
             cv.Optional(CONF_FALL_DETECTION): cv.boolean,
             cv.Optional(CONF_FALL_DETECTION_SENSITIVITY): cv.enum(SENSITIVITY_LEVELS),
             cv.Optional(CONF_SLEEP_REPORT_ENABLE): cv.boolean,
@@ -260,7 +272,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_TARGET_TYPE_ENABLE, default=False): cv.boolean,
             cv.Optional(CONF_DWELL_TIME_ENABLE, default=False): cv.boolean,
             cv.Optional(CONF_WALKING_DISTANCE_ENABLE, default=False): cv.boolean,
-            cv.Optional(CONF_THERMODYNAMIC_CHART_ENABLE, default=True): cv.boolean,
+            # Off like stock: radar FW 99 stops tracking while it is on.
+            cv.Optional(CONF_THERMODYNAMIC_CHART_ENABLE, default=False): cv.boolean,
             cv.Optional(CONF_INTERFERENCE_GRID): parse_ascii_grid,
             cv.Optional(CONF_EXIT_GRID): parse_ascii_grid,
             cv.Optional(CONF_EDGE_GRID): parse_ascii_grid,
@@ -368,6 +381,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_TARGET_POSTURE): text_sensor_.text_sensor_schema(
                 icon="mdi:human",
             ),
+            cv.Optional(CONF_PRESENCE_EVENT): text_sensor_.text_sensor_schema(
+                icon="mdi:motion-sensor",
+            ),
             cv.Optional(CONF_PEOPLE_COUNTING): text_sensor_.text_sensor_schema(
                 icon="mdi:counter",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -393,6 +409,7 @@ SENSOR_MAP = {
     CONF_SLEEP_EVENT: (text_sensor_.new_text_sensor, "set_sleep_event_sensor"),
     CONF_TARGET_POSTURE: (text_sensor_.new_text_sensor, "set_target_posture_sensor"),
     CONF_PEOPLE_COUNTING: (text_sensor_.new_text_sensor, "set_people_counting_sensor"),
+    CONF_PRESENCE_EVENT: (text_sensor_.new_text_sensor, "set_presence_event_sensor"),
     CONF_SLEEP_PRESENCE: (binary_sensor.new_binary_sensor, "set_sleep_presence_sensor"),
     CONF_SLEEP_INOUT_STATE: (binary_sensor.new_binary_sensor, "set_sleep_inout_sensor"),
     CONF_FALL_DETECTED: (binary_sensor.new_binary_sensor, "set_fall_detected_sensor"),
@@ -451,6 +468,7 @@ async def to_code(config):
 
     cg.add(var.set_mounting_position(config[CONF_MOUNTING_POSITION]))
     cg.add(var.set_left_right_reverse(config[CONF_LEFT_RIGHT_REVERSE]))
+    cg.add(var.set_proximity(config[CONF_PROXIMITY]))
     cg.add(var.set_debug_probe_reads(config[CONF_DEBUG_PROBE_READS]))
     cg.add(var.set_debug_mode(config[CONF_DEBUG_MODE]))
     cg.add(var.set_telnet_enable(config[CONF_TELNET_ENABLE]))
