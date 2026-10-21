@@ -279,6 +279,10 @@ struct FP2Command {
   std::vector<uint8_t> data;
   uint32_t last_send_time;
   uint8_t retry_count;
+  // Frame sequence number. -1 = next host sequence number; ACKs and
+  // reverse-read responses echo the radar's sequence number instead, like
+  // the stock ESP firmware does.
+  int16_t seq{-1};
 };
 
 // RUN-02/RUN-04 (09-03): NVS-persisted overrides for per-zone and Global
@@ -383,6 +387,7 @@ public:
   void set_radar_reset_pin(GPIOPin *pin) { reset_pin_ = pin; }
   void set_mounting_position(uint8_t pos) { mounting_position_ = pos; }
   void set_left_right_reverse(bool val) { left_right_reverse_ = val; }
+  void set_proximity(uint8_t val) { proximity_ = val; }
 
   void set_fall_detection(bool val) {
     fall_detection_enabled_ = val;
@@ -512,6 +517,9 @@ public:
   }
   void set_people_counting_sensor(text_sensor::TextSensor *sensor) {
       people_counting_sensor_ = sensor;
+  }
+  void set_presence_event_sensor(text_sensor::TextSensor *sensor) {
+      presence_event_sensor_ = sensor;
   }
   void set_sleep_presence_sensor(binary_sensor::BinarySensor *sensor) {
       sleep_presence_sensor_ = sensor;
@@ -710,7 +718,7 @@ protected:
   void handle_people_counting_report_(const std::vector<uint8_t> &payload);
   void handle_response_(AttrId attr_id, const std::vector<uint8_t> &payload);
   void handle_reverse_read_request_(AttrId attr_id);
-  void send_ack_(AttrId attr_id);
+  void send_ack_(AttrId attr_id, uint8_t seq);
   const char* attr_id_to_string_(AttrId attr_id);
   const char* op_code_to_string_(uint8_t type);
   std::string format_payload_hex_(const std::vector<uint8_t> &payload, size_t max_bytes);
@@ -720,6 +728,11 @@ protected:
   // Initialization
   void perform_reset_();
   void check_initialization_();
+  void check_heartbeat_watchdog_();
+  void restart_initialization_(const char *reason);
+  void send_orientation_reports_();
+  std::vector<uint8_t> build_zone_activation_list_() const;
+  uint8_t resolve_zone_type_(uint8_t zone_id, int zone_type) const;
 
   // RUN-02/RUN-04 (09-03): NVS override load/save helpers (09-RESEARCH.md
   // Pattern 4). load_* returns false (treated as "no override, use the
@@ -760,10 +773,16 @@ protected:
   bool init_done_{false};
   uint32_t last_radar_frame_millis_{0};
   uint32_t last_heartbeat_millis_{0};
+  // Radar watchdog: re-run the init sequence if the heartbeat stops, or if
+  // the radar sends an unprompted work_mode report (it does so on boot).
+  static const uint32_t HEARTBEAT_TIMEOUT_MS = 15000;
+  static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
+  uint32_t last_work_mode_write_millis_{0};
 
   // Configuration State
   uint8_t mounting_position_{0x01}; // Default Wall
   bool left_right_reverse_{false};
+  uint8_t proximity_{1};  // 0x0106: 0=far 1=medium 2=close
   bool fall_detection_enabled_{false};
   bool has_fall_detection_enabled_{false};
   uint8_t fall_detection_sensitivity_{1};
@@ -777,7 +796,7 @@ protected:
   bool target_type_enable_{false};
   bool dwell_time_enable_{false};
   bool walking_distance_enable_{false};
-  bool thermodynamic_chart_enable_{true};
+  bool thermodynamic_chart_enable_{false};
 
   // Grids (Optional)
   GridMap interference_grid_{};
@@ -837,6 +856,7 @@ protected:
   text_sensor::TextSensor *sleep_event_sensor_{nullptr};
   text_sensor::TextSensor *target_posture_sensor_{nullptr};
   text_sensor::TextSensor *people_counting_sensor_{nullptr};
+  text_sensor::TextSensor *presence_event_sensor_{nullptr};
   binary_sensor::BinarySensor *sleep_presence_sensor_{nullptr};
   binary_sensor::BinarySensor *sleep_inout_sensor_{nullptr};
   binary_sensor::BinarySensor *fall_detected_sensor_{nullptr};
@@ -938,7 +958,8 @@ protected:
   void enqueue_command_blob2_(AttrId attr_id,
                               const std::vector<uint8_t> &blob_content);
   void enqueue_read_(AttrId attr_id);
-  void send_reverse_response_(AttrId attr_id, uint8_t byte_val);
+  void send_reverse_response_(AttrId attr_id, uint8_t byte_val, uint8_t seq);
+  void send_reverse_response_(AttrId attr_id, uint16_t word_val, uint8_t seq);
 };
 
 } // namespace aqara_fp2

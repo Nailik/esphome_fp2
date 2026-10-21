@@ -234,8 +234,11 @@ aqara_fp2:
   uart_id: uart_bus
 
   radar_reset_pin: GPIO13
-  mounting_position: left_corner
+  # Radar FW 99 never starts tracking in left_corner/right_corner; use wall.
+  mounting_position: wall
   left_right_reverse: false
+  # Approach/away distance, like "Proximity" in the Aqara app: far / medium / close
+  proximity: medium
 
   # Firmware-derived radar report controls.
   # These mirror stock firmware SubIDs 0x0156-0x0174.
@@ -244,7 +247,8 @@ aqara_fp2:
   target_type_enable: false
   dwell_time_enable: false
   walking_distance_enable: false
-  thermodynamic_chart_enable: true
+  # Keep off: the stock firmware never enables it and FW 99 stops tracking.
+  thermodynamic_chart_enable: false
   # debug_mode: dumps the full hex of EVERY TX/RX frame to the logs (verbose) for
   # protocol reverse-engineering, beyond the existing radar_debug diagnostics.
   # Default false = current radar_debug-only behavior, byte-for-byte unchanged.
@@ -401,6 +405,10 @@ aqara_fp2:
     name: "Sleep Event"
   target_posture:
     name: "Target Posture"
+  # 0x0103 presence event: enter/leave/left_enter/right_leave/right_enter/
+  # left_leave/approach/away
+  presence_event:
+    name: "Presence Event"
 
 sensor:
   - platform: opt3001

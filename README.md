@@ -81,11 +81,16 @@ The ESPHome component exposes several SubIDs found in the stock firmware dump. D
 | `target_type_enable` | `0x0163` | `false` | Stock app labels this as AI Person Detection; lab testing showed `true` can suppress target streaming. |
 | `dwell_time_enable` | `0x0172` | `false` | Enables dwell-time reporting path. |
 | `walking_distance_enable` | `0x0173` | `false` | Enables accumulated walking-distance reports. |
-| `thermodynamic_chart_enable` | `0x0138` | `true` | Enables thermodynamic chart reports; raw BLOB remains in `radar_debug`. |
-| `sleep_report_enable` | `0x0156` | unset | Optional; enables sleep reports when configured. |
+| `thermodynamic_chart_enable` | `0x0138` | `false` | Enables thermodynamic chart reports; raw BLOB remains in `radar_debug`. The stock firmware never enables it and radar FW 99 stops tracking while it is on. |
+| `sleep_report_enable` | `0x0156` | `false` | Written on every init: the radar remembers it across resets and stops normal reporting while it is on. |
 | `posture_report_enable` | `0x0157` | unset | Optional; enables target-posture reports when configured. |
 | `fall_detection` | `0x0121` | unset | Optional fall-detection enable. |
-| `fall_detection_sensitivity` | `0x0123` | unset | `low`, `medium`, or `high`. |
+| `proximity` | `0x0106` | `medium` | `far`, `medium`, or `close` - the approach/away distance ("Proximity" in the Aqara app). Not a hard range cutoff; use `edge_grid` or zones to ignore an area. |
+| `fall_detection_sensitivity` | `0x0123` | `low` | `low`, `medium`, or `high`. Written on every init, like stock. |
+
+`mounting_position` defaults to `wall`: units on radar firmware 99 never start tracking in the `left_corner`/`right_corner` modes. Edge and interference maps are always written on init (all-zero when not configured), because the radar keeps the last edge map from the Aqara app in its own flash and ignores targets inside it.
+
+The optional `presence_event` text sensor publishes the `0x0103` presence event (`enter`, `leave`, `left_enter`, `right_leave`, `right_enter`, `left_leave`, `approach`, `away`); global motion turns on for arrivals and off for departures.
 
 Optional entities decoded from simple firmware-confirmed report wrappers:
 
