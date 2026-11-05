@@ -53,6 +53,7 @@ CONF_FP2_ID = "fp2_id"
 
 CONF_MOUNTING_POSITION = "mounting_position"
 CONF_LEFT_RIGHT_REVERSE = "left_right_reverse"
+CONF_TARGET_TIMEOUT = "target_timeout"
 # 0x0106 approach/away distance ("Proximity" in the Aqara app)
 CONF_PROXIMITY = "proximity"
 CONF_INTERFERENCE_GRID = "interference_grid"
@@ -262,6 +263,9 @@ CONFIG_SCHEMA = (
             ),
 
             cv.Optional(CONF_LEFT_RIGHT_REVERSE, default=False): cv.boolean,
+            # Longest silence in the 0x0117 target stream before the last
+            # published target list is retracted as stale. "0s" disables it.
+            cv.Optional(CONF_TARGET_TIMEOUT, default="8s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_PROXIMITY, default="medium"): cv.enum(PROXIMITY_LEVELS),
             cv.Optional(CONF_FALL_DETECTION): cv.boolean,
             cv.Optional(CONF_FALL_DETECTION_SENSITIVITY): cv.enum(SENSITIVITY_LEVELS),
@@ -468,6 +472,7 @@ async def to_code(config):
 
     cg.add(var.set_mounting_position(config[CONF_MOUNTING_POSITION]))
     cg.add(var.set_left_right_reverse(config[CONF_LEFT_RIGHT_REVERSE]))
+    cg.add(var.set_target_timeout(config[CONF_TARGET_TIMEOUT]))
     cg.add(var.set_proximity(config[CONF_PROXIMITY]))
     cg.add(var.set_debug_probe_reads(config[CONF_DEBUG_PROBE_READS]))
     cg.add(var.set_debug_mode(config[CONF_DEBUG_MODE]))
