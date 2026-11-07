@@ -1698,6 +1698,25 @@ void FP2Component::check_initialization_() {
         grid = ov.grid;
         sensitivity = ov.sensitivity;
         zone_type = ov.zone_type;
+
+        // Mirror the override into the live FP2Zone, matching what
+        // save_zone_to_sensor() already does on the save itself. Without this
+        // the radar runs the override while json_get_map_data() keeps
+        // reporting the compiled values to GET /api/zones, the /zones editor,
+        // get_map_config and the map_sensor - and nothing corrects it later,
+        // because rehydrate_zone_registry_() skips every already-compiled id.
+        // A floorplan card drawing zone outlines from that data would place
+        // them on cells the radar is not using.
+        zone->grid = grid;
+        zone->sensitivity = sensitivity;
+        if (zone_type >= 0) {
+          zone->set_zone_type((uint8_t) zone_type);
+        } else {
+          zone->has_zone_type = false;
+        }
+        if (zone->map_sensor != nullptr) {
+          zone->map_sensor->publish_state(grid_to_hex_card_format(zone->grid));
+        }
       }
 
       // a. Send Zone Detect Setting (0x0114)
