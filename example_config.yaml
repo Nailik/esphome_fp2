@@ -372,6 +372,11 @@ aqara_fp2:
       # people_count:
       #   name: "Sofa Zone People Count"
 
+  # One-shot learning triggers (the Aqara app's "AI learning"): the radar
+  # learns the interference sources / room edge itself.
+  interference_learning_button: { name: "Learn Interference" }
+  edge_learning_button:         { name: "Learn Edge" }
+
   radar_software_version:
     name: "Radar Software Version"
   radar_temperature:

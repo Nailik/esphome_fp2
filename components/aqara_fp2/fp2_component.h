@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/button/button.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/sensor/sensor.h"
@@ -351,6 +352,21 @@ static const GridMap FULL_ACTIVE_GRID = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+// One-shot learning triggers (the "AI learning" buttons in the Aqara app).
+// Pressing writes a 1 to the radar's auto-learn attribute once; the radar runs
+// the learning itself and reports the resulting map back. Deliberately a
+// button, not a switch: the attribute is a trigger, and re-sending it on every
+// (re)initialisation makes the radar go silent (observed on FW 100).
+class FP2LearnButton : public button::Button {
+public:
+  void set_parent(FP2Component *parent, AttrId attr) { parent_ = parent; attr_ = attr; }
+
+protected:
+  void press_action() override;
+  FP2Component *parent_{nullptr};
+  AttrId attr_{AttrId::INVALID};
+};
+
 class FP2LocationSwitch : public switch_::Switch {
 public:
   void set_parent(FP2Component *parent) { parent_ = parent; }
@@ -572,6 +588,8 @@ public:
   void reset_radar();
   void set_edge_auto_enabled(bool enabled);
   void set_interference_auto_enabled(bool enabled);
+  // Start one learning run on the radar (see FP2LearnButton).
+  void trigger_learning(AttrId attr);
 
   // Grid format conversion
   std::string grid_to_hex_card_format(const GridMap &grid);

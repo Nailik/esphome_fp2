@@ -3,7 +3,7 @@ import json
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import binary_sensor, select, sensor, switch, uart, web_server, web_server_base
+from esphome.components import binary_sensor, button, select, sensor, switch, uart, web_server, web_server_base
 from esphome.components import text_sensor as text_sensor_
 from esphome.components.web_server_base import CONF_WEB_SERVER_BASE_ID
 from esphome.const import (
@@ -36,12 +36,23 @@ DEPENDENCIES = ["uart"]
 # DIAG-02 (08-04): "socket" gives us ESPHome core's non-blocking socket::
 # wrapper (same one api_server.cpp uses) for the optional telnet raw-UART
 # bridge - no separate pip install, no FreeRTOS task.
-AUTO_LOAD = ["binary_sensor", "text_sensor", "sensor", "select", "switch", "json", "socket"]
+AUTO_LOAD = ["binary_sensor", "button", "text_sensor", "sensor", "select", "switch", "json", "socket"]
 
 aqara_fp2_ns = cg.esphome_ns.namespace("aqara_fp2")
 FP2Component = aqara_fp2_ns.class_("FP2Component", cg.Component, uart.UARTDevice)
 FP2LocationSwitch = aqara_fp2_ns.class_("FP2LocationSwitch", switch.Switch)
 FP2OperatingModeSelect = aqara_fp2_ns.class_("FP2OperatingModeSelect", select.Select)
+FP2LearnButton = aqara_fp2_ns.class_("FP2LearnButton", button.Button)
+AttrId = aqara_fp2_ns.enum("AttrId", is_class=True)
+
+# One-shot learning triggers (the Aqara app's "AI learning"): the radar learns
+# the interference sources / room edge itself and reports the map back. Buttons
+# rather than switches: the attribute is a trigger, and re-sending it at every
+# (re)initialisation makes the radar go silent. key -> (AttrId name, icon)
+LEARN_BUTTONS = {
+    "interference_learning_button": ("INTERFERENCE_AUTO_ENABLE", "mdi:school"),
+    "edge_learning_button": ("EDGE_AUTO_ENABLE", "mdi:border-outside"),
+}
 FP2Zone = aqara_fp2_ns.class_("FP2Zone", cg.Component)
 
 # PROTO-04 (D-04): must match fp2_component.h's OPERATING_MODE_* constants
@@ -285,6 +296,10 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_OPERATING_MODE): select.select_schema(
                 FP2OperatingModeSelect
             ),
+            **{
+                cv.Optional(key): button.button_schema(FP2LearnButton, icon=icon)
+                for key, (_, icon) in LEARN_BUTTONS.items()
+            },
 
             cv.Optional("edge_label_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
             cv.Optional("entry_exit_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
@@ -527,6 +542,11 @@ async def to_code(config):
             config[CONF_OPERATING_MODE], options=OPERATING_MODE_OPTIONS
         )
         cg.add(var.set_operating_mode_select(sel))
+
+    for key, (attr, _) in LEARN_BUTTONS.items():
+        if key in config:
+            btn = await button.new_button(config[key])
+            cg.add(btn.set_parent(var, getattr(AttrId, attr)))
 
     # Generate map config JSON data at compile time
     map_config_data = {

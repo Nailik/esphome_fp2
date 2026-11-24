@@ -87,6 +87,8 @@ The ESPHome component exposes several SubIDs found in the stock firmware dump. D
 | `fall_detection` | `0x0121` | unset | Optional fall-detection enable. |
 | `proximity` | `0x0106` | `medium` | `far`, `medium`, or `close` - the approach/away distance ("Proximity" in the Aqara app). Not a hard range cutoff; use `edge_grid` or zones to ignore an area. |
 | `fall_detection_sensitivity` | `0x0123` | `low` | `low`, `medium`, or `high`. Written on every init, like stock. |
+| `interference_learning_button` | `0x0139` | unset | Optional button: starts one interference-learning run on the radar (the Aqara app's "AI learning"). A trigger, not a state - never written at init. |
+| `edge_learning_button` | `0x0150` | unset | Optional button: starts one room-edge learning run. Same trigger semantics. |
 
 `mounting_position` defaults to `wall`: units on radar firmware 99 never start tracking in the `left_corner`/`right_corner` modes. Edge and interference maps are always written on init (all-zero when not configured), because the radar keeps the last edge map from the Aqara app in its own flash and ignores targets inside it.
 

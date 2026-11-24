@@ -446,6 +446,20 @@ void FP2Component::set_interference_auto_enabled(bool enabled) {
   enqueue_command_(OpCode::WRITE, AttrId::INTERFERENCE_AUTO_ENABLE, enabled);
 }
 
+void FP2LearnButton::press_action() {
+  if (this->parent_ != nullptr)
+    this->parent_->trigger_learning(this->attr_);
+}
+
+void FP2Component::trigger_learning(AttrId attr) {
+  if (!init_done_) {
+    ESP_LOGW(TAG, "Learning 0x%04X ignored: radar not initialised yet", (uint16_t) attr);
+    return;
+  }
+  ESP_LOGI(TAG, "Learning 0x%04X started", (uint16_t) attr);
+  enqueue_command_(OpCode::WRITE, attr, true);
+}
+
 // RUN-02/RUN-04 (09-03): NVS override load/save helpers using ESPHome's
 // standard global_preferences->make_preference<T>(fnv1_hash(...)) mechanism
 // (09-RESEARCH.md Pattern 4, Don't Hand-Roll) - not raw NVS/SPIFFS, not a
