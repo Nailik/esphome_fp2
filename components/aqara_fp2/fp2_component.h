@@ -804,9 +804,14 @@ protected:
   bool init_done_{false};
   uint32_t last_radar_frame_millis_{0};
   uint32_t last_heartbeat_millis_{0};
+  uint32_t last_reset_millis_{0};
   // Radar watchdog: re-run the init sequence if the heartbeat stops, or if
   // the radar sends an unprompted work_mode report (it does so on boot).
   static const uint32_t HEARTBEAT_TIMEOUT_MS = 15000;
+  // A soft reboot (OTA) leaves the radar powered and it then sometimes never
+  // sends anything at all; nothing else in the init path retries, so re-pulse
+  // the reset pin once this long has passed with no radar traffic.
+  static const uint32_t NO_TRAFFIC_RETRY_MS = 10000;
   static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
   uint32_t last_work_mode_write_millis_{0};
 

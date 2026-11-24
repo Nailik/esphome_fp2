@@ -234,6 +234,7 @@ void FP2Component::setup() {
 }
 
 void FP2Component::perform_reset_() {
+  last_reset_millis_ = millis();
   command_queue_.clear();
   waiting_for_ack_attr_id_ = AttrId::INVALID;
   init_done_ = false;
@@ -1579,6 +1580,17 @@ uint8_t FP2Component::resolve_zone_type_(uint8_t zone_id, int zone_type) const {
 void FP2Component::check_initialization_() {
   if (init_done_)
     return;
+
+  // Nothing at all from the radar since the reset: pulse the reset pin again.
+  // Without this a soft reboot that leaves the radar silent stays silent until
+  // the host is power-cycled by hand.
+  if (last_radar_frame_millis_ == 0 && reset_pin_ != nullptr && last_reset_millis_ > 0 &&
+      millis() - last_reset_millis_ > NO_TRAFFIC_RETRY_MS) {
+    ESP_LOGW(TAG, "No radar traffic %lums after reset, resetting the radar again",
+             (unsigned long) (millis() - last_reset_millis_));
+    perform_reset_();
+    return;
+  }
 
   if (last_radar_frame_millis_ > 0) {
     ESP_LOGI(TAG, "Radar traffic received. Starting initialization sequence...");
