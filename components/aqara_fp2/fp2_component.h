@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/sensor/sensor.h"
@@ -351,6 +352,28 @@ static const GridMap FULL_ACTIVE_GRID = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+// The two runtime-tunable motion parameters (see target_moving_()). Persisted
+// to flash under the entity's own NVS key so a value set in Home Assistant
+// survives a reboot.
+class FP2MotionNumber : public number::Number, public Component {
+public:
+  enum Kind : uint8_t { TIMEOUT = 0, DISTANCE = 1 };
+  void set_parent(FP2Component *parent, uint8_t kind, float initial) {
+    parent_ = parent;
+    kind_ = kind;
+    initial_ = initial;
+  }
+  void setup() override;
+
+protected:
+  void control(float value) override;
+  void apply_(float value);
+  FP2Component *parent_{nullptr};
+  uint8_t kind_{TIMEOUT};
+  float initial_{0.0f};
+  ESPPreferenceObject pref_;
+};
+
 class FP2LocationSwitch : public switch_::Switch {
 public:
   void set_parent(FP2Component *parent) { parent_ = parent; }
@@ -385,6 +408,8 @@ public:
 
   // Configuration setters
   void set_radar_reset_pin(GPIOPin *pin) { reset_pin_ = pin; }
+  void set_motion_timeout_s(float s) { motion_timeout_ms_ = (uint32_t) (s * 1000.0f); }
+  void set_motion_distance_cm(float cm) { motion_distance_cm_ = cm; }
   void set_mounting_position(uint8_t pos) { mounting_position_ = pos; }
   void set_left_right_reverse(bool val) { left_right_reverse_ = val; }
   void set_proximity(uint8_t val) { proximity_ = val; }
@@ -843,6 +868,28 @@ protected:
   text_sensor::TextSensor *mounting_position_sensor_{nullptr};
 
   sensor::Sensor *radar_temperature_sensor_{nullptr};
+
+  // Global motion from target positions. A target counts as moving once it has
+  // travelled motion_distance_cm_ from its reference point (raw target units
+  // are 1 cm), and keeps counting as moving for motion_timeout_ms_ after that
+  // step. One slot per concurrently tracked target; the radar never reports
+  // more than 8 at once, and the least-recently-seen slot is recycled if it
+  // ever does.
+  struct MotionTrack {
+    bool used{false};
+    uint8_t id{0};
+    int16_t ref_x{0}, ref_y{0};
+    uint32_t last_move_ms{0};
+    uint32_t seen_ms{0};
+  };
+  MotionTrack motion_tracks_[8];
+  uint32_t motion_timeout_ms_{5000};
+  float motion_distance_cm_{20.0f};
+  uint32_t last_motion_ms_{0};
+  bool target_moving_(uint8_t id, int16_t x, int16_t y, uint32_t now);
+  void prune_motion_tracks_(uint32_t now);
+  void force_motion_off_();
+  void check_motion_timeout_();
   sensor::Sensor *realtime_people_number_sensor_{nullptr};
   sensor::Sensor *ontime_people_number_sensor_{nullptr};
   sensor::Sensor *realtime_people_counting_sensor_{nullptr};
