@@ -3,7 +3,7 @@ import json
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import binary_sensor, select, sensor, switch, uart, web_server, web_server_base
+from esphome.components import binary_sensor, number, select, sensor, switch, uart, web_server, web_server_base
 from esphome.components import text_sensor as text_sensor_
 from esphome.components.web_server_base import CONF_WEB_SERVER_BASE_ID
 from esphome.const import (
@@ -22,6 +22,7 @@ from esphome.const import (
     DEVICE_CLASS_MOTION,
     DEVICE_CLASS_SAFETY,
     STATE_CLASS_MEASUREMENT,
+    ENTITY_CATEGORY_CONFIG,
     ENTITY_CATEGORY_DIAGNOSTIC,
     UNIT_CELSIUS,
     ICON_THERMOMETER,
@@ -36,12 +37,15 @@ DEPENDENCIES = ["uart"]
 # DIAG-02 (08-04): "socket" gives us ESPHome core's non-blocking socket::
 # wrapper (same one api_server.cpp uses) for the optional telnet raw-UART
 # bridge - no separate pip install, no FreeRTOS task.
-AUTO_LOAD = ["binary_sensor", "text_sensor", "sensor", "select", "switch", "json", "socket"]
+AUTO_LOAD = ["binary_sensor", "number", "text_sensor", "sensor", "select", "switch", "json", "socket"]
 
 aqara_fp2_ns = cg.esphome_ns.namespace("aqara_fp2")
 FP2Component = aqara_fp2_ns.class_("FP2Component", cg.Component, uart.UARTDevice)
 FP2LocationSwitch = aqara_fp2_ns.class_("FP2LocationSwitch", switch.Switch)
 FP2OperatingModeSelect = aqara_fp2_ns.class_("FP2OperatingModeSelect", select.Select)
+FP2TemperatureOffsetNumber = aqara_fp2_ns.class_(
+    "FP2TemperatureOffsetNumber", number.Number, cg.Component
+)
 FP2Zone = aqara_fp2_ns.class_("FP2Zone", cg.Component)
 
 # PROTO-04 (D-04): must match fp2_component.h's OPERATING_MODE_* constants
@@ -87,6 +91,8 @@ CONF_TARGET_TRACKING = "target_tracking"
 CONF_LOCATION_REPORT_SWITCH = "location_report_switch"
 CONF_OPERATING_MODE = "operating_mode"
 CONF_RADAR_TEMPERATURE = "radar_temperature"
+CONF_TEMPERATURE_OFFSET = "temperature_offset"
+CONF_INITIAL_VALUE = "initial_value"
 CONF_REALTIME_PEOPLE_NUMBER = "realtime_people_number"
 CONF_ONTIME_PEOPLE_NUMBER = "ontime_people_number"
 CONF_REALTIME_PEOPLE_COUNTING = "realtime_people_counting"
@@ -284,6 +290,23 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_OPERATING_MODE): select.select_schema(
                 FP2OperatingModeSelect
+            ),
+            # Added to the radar's reported temperature. The radar reports its
+            # die temperature, which runs well above the room; the correction
+            # depends on the enclosure, so it is tunable at runtime and the
+            # value is kept in flash. initial_value only applies on a device
+            # that has never had one saved.
+            cv.Optional(CONF_TEMPERATURE_OFFSET): number.number_schema(
+                FP2TemperatureOffsetNumber,
+                unit_of_measurement=UNIT_CELSIUS,
+                icon="mdi:thermometer-minus",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            ).extend(
+                {
+                    cv.Optional(CONF_INITIAL_VALUE, default=0.0): cv.float_range(
+                        min=-50.0, max=50.0
+                    )
+                }
             ),
 
             cv.Optional("edge_label_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
@@ -527,6 +550,14 @@ async def to_code(config):
             config[CONF_OPERATING_MODE], options=OPERATING_MODE_OPTIONS
         )
         cg.add(var.set_operating_mode_select(sel))
+
+    if CONF_TEMPERATURE_OFFSET in config:
+        offset_conf = config[CONF_TEMPERATURE_OFFSET]
+        num = await number.new_number(
+            offset_conf, min_value=-50.0, max_value=50.0, step=0.5
+        )
+        await cg.register_component(num, offset_conf)
+        cg.add(num.set_parent(var, offset_conf[CONF_INITIAL_VALUE]))
 
     # Generate map config JSON data at compile time
     map_config_data = {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/sensor/sensor.h"
@@ -351,6 +352,24 @@ static const GridMap FULL_ACTIVE_GRID = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+// Runtime-tunable offset added to the radar temperature before it is
+// published. The radar reports its own die temperature, which runs well above
+// the room, and the right correction depends on the enclosure - so it is a
+// number in Home Assistant, persisted to flash (its own NVS key, derived from
+// the entity's object id) so the value survives a reboot.
+class FP2TemperatureOffsetNumber : public number::Number, public Component {
+public:
+  void set_parent(FP2Component *parent, float initial) { parent_ = parent; initial_ = initial; }
+  void setup() override;
+
+protected:
+  void control(float value) override;
+  void apply_(float value);
+  FP2Component *parent_{nullptr};
+  float initial_{0.0f};
+  ESPPreferenceObject pref_;
+};
+
 class FP2LocationSwitch : public switch_::Switch {
 public:
   void set_parent(FP2Component *parent) { parent_ = parent; }
@@ -480,6 +499,7 @@ public:
       mounting_position_sensor_->publish_state(pos_str);
     }
   }
+  void set_temperature_offset(float celsius) { temperature_offset_ = celsius; }
   void set_radar_temperature_sensor(sensor::Sensor *sensor) {
       radar_temperature_sensor_ = sensor;
   }
@@ -843,6 +863,8 @@ protected:
   text_sensor::TextSensor *mounting_position_sensor_{nullptr};
 
   sensor::Sensor *radar_temperature_sensor_{nullptr};
+  // Added to the radar's reported temperature before publishing.
+  float temperature_offset_{0.0f};
   sensor::Sensor *realtime_people_number_sensor_{nullptr};
   sensor::Sensor *ontime_people_number_sensor_{nullptr};
   sensor::Sensor *realtime_people_counting_sensor_{nullptr};

@@ -372,6 +372,12 @@ aqara_fp2:
       # people_count:
       #   name: "Sofa Zone People Count"
 
+  # Added to the radar temperature (it reports its own die temperature, which
+  # runs above the room). Tunable in Home Assistant, kept in flash.
+  temperature_offset:
+    name: "Radar Temperature Offset"
+    initial_value: 0.0
+
   radar_software_version:
     name: "Radar Software Version"
   radar_temperature:

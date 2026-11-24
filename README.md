@@ -108,6 +108,7 @@ Optional entities decoded from simple firmware-confirmed report wrappers:
 | `sleep_event` | `0x0176` | text sensor |
 | `target_posture` | `0x0154` | text sensor |
 | `radar_debug` | `0x0201`, unhandled reports, and command telemetry | diagnostic text sensor |
+| `temperature_offset` | - | number, °C, added to `radar_temperature` before publishing. The radar reports its die temperature, which runs well above the room. Persisted to flash; `initial_value` only applies before anything has been saved. |
 
 Diagnostic actions exposed in the example config:
 

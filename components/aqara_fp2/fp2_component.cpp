@@ -1285,6 +1285,27 @@ void FP2Component::save_zone_from_editor(uint8_t zone_id, uint8_t sensitivity, i
   this->save_zone_to_sensor(zone_id, hex, sensitivity, zone_type);
 }
 
+void FP2TemperatureOffsetNumber::setup() {
+  this->pref_ = global_preferences->make_preference<float>(this->get_object_id_hash());
+  float value = this->initial_;
+  float saved;
+  // No > 0 guard: a negative offset is the normal case here.
+  if (this->pref_.load(&saved) && std::isfinite(saved))
+    value = saved;
+  this->apply_(value);
+}
+
+void FP2TemperatureOffsetNumber::control(float value) {
+  this->apply_(value);
+  this->pref_.save(&value);
+}
+
+void FP2TemperatureOffsetNumber::apply_(float value) {
+  if (this->parent_ != nullptr)
+    this->parent_->set_temperature_offset(value);
+  this->publish_state(value);
+}
+
 void FP2LocationSwitch::write_state(bool state) {
   if (this->parent_ != nullptr) {
     this->parent_->set_location_reporting_enabled(state);
@@ -2380,9 +2401,9 @@ void FP2Component::handle_temperature_report_(const std::vector<uint8_t> &payloa
     if (payload.size() == 5 && payload[2] == 0x01) {
         uint16_t temp = payload[3] << 8 | payload[4];
         if (radar_temperature_sensor_ != nullptr) {
-            radar_temperature_sensor_->publish_state(temp);
+            radar_temperature_sensor_->publish_state(temp + temperature_offset_);
         }
-        ESP_LOGD(TAG, "Radar temperature report: %d", temp);
+        ESP_LOGD(TAG, "Radar temperature report: %d (offset %+.1f)", temp, temperature_offset_);
     } else {
         ESP_LOGD(TAG, "Unexpected radar temperature report format");
     }
