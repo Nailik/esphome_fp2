@@ -308,6 +308,17 @@ struct FP2GlobalZoneOverride {
 
 static const uint32_t FP2_OVERRIDE_VERSION = 1;
 
+// A map the radar learned itself (after a learning button) persisted to its
+// own versioned NVS blob, one per map kind - same packed-struct idiom as
+// FP2ZoneOverride above, and deliberately a DISTINCT version constant so a
+// change here can never invalidate the zone overrides.
+struct FP2MapOverride {
+  uint32_t version;
+  GridMap grid;
+} __attribute__((packed));
+
+static const uint32_t FP2_MAP_OVERRIDE_VERSION = 1;
+
 // RENAME-01 (13.1.1-01): a runtime zone's custom display name, persisted to
 // a DISTINCT, separately-versioned NVS blob (key "fp2_zone_name_<id>") -
 // deliberately NOT a new field on FP2ZoneOverride. Adding a field to
@@ -765,6 +776,15 @@ protected:
   bool load_zone_override_(uint8_t zone_id, FP2ZoneOverride *out);
   void save_zone_override_(uint8_t zone_id, const GridMap &grid, uint8_t sensitivity,
                             int zone_type);
+  // Learned maps (0x0110 interference, 0x0107 edge). kind: 0 = interference,
+  // 1 = edge. apply_map_overrides_() runs before the boot writes so a learned
+  // map is written back instead of being wiped by the all-zero write.
+  enum MapKind : uint8_t { MAP_INTERFERENCE = 0, MAP_EDGE = 1 };
+  bool load_map_override_(uint8_t kind, FP2MapOverride *out);
+  void save_map_override_(uint8_t kind, const GridMap &grid);
+  void apply_map_overrides_();
+  void handle_learned_map_report_(AttrId attr_id, const std::vector<uint8_t> &payload);
+  void publish_map_grid_sensor_(uint8_t kind);
   bool load_global_zone_override_(FP2GlobalZoneOverride *out);
   void save_global_zone_override_(uint8_t presence_sensitivity);
 
