@@ -815,7 +815,8 @@ protected:
   // The retry is bounded: the delay doubles each attempt (10s, 20s, 40s, 80s,
   // 160s) and then stops, so a radar that is never going to answer does not
   // pulse reset and block the main loop for ever. Cleared whenever traffic is
-  // actually seen - see check_initialization_().
+  // actually seen (check_initialization_()), and by a hand-requested reset
+  // (reset_radar()).
   static const uint8_t MAX_NO_TRAFFIC_RETRIES = 5;
   uint8_t no_traffic_retries_{0};
   bool no_traffic_gave_up_{false};

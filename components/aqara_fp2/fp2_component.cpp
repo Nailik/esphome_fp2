@@ -443,6 +443,13 @@ void FP2Component::calibrate_empty_room() {
 
 void FP2Component::reset_radar() {
   ESP_LOGI(TAG, "Resetting radar module via diagnostic action");
+  // Someone asking for a reset by hand is the one signal that the thing the
+  // retry gave up on may have been fixed (wiring, power, a reseated module),
+  // so give them the full sequence again. Not in perform_reset_(): the retry
+  // in check_initialization_() calls that itself, and clearing the counter
+  // there would make the retry unbounded.
+  no_traffic_retries_ = 0;
+  no_traffic_gave_up_ = false;
   perform_reset_();
 }
 
