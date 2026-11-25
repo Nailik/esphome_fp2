@@ -811,6 +811,11 @@ protected:
   // 1 = edge. apply_map_overrides_() runs before the boot writes so a learned
   // map is written back instead of being wiped by the all-zero write.
   enum MapKind : uint8_t { MAP_INTERFERENCE = 0, MAP_EDGE = 1 };
+  // Indexed by MapKind: true between a learning button press and the radar's
+  // answering map report. Gates persistence, so an unsolicited report cannot
+  // overwrite the configured map - see handle_learned_map_report_(). Cleared
+  // by perform_reset_(), since a run cannot survive a radar reset.
+  bool learn_pending_[2]{false, false};
   bool load_map_override_(uint8_t kind, FP2MapOverride *out);
   void save_map_override_(uint8_t kind, const GridMap &grid);
   void apply_map_overrides_();
