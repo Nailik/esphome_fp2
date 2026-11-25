@@ -240,6 +240,12 @@ aqara_fp2:
   # Approach/away distance, like "Proximity" in the Aqara app: far / medium / close
   proximity: medium
 
+  # Retract a target list the radar has stopped refreshing. The 0x0117 stream
+  # can simply stop with the last frame still carrying a target - typically
+  # right after somebody walks out - and a text sensor latches its last value,
+  # so cards keep drawing a person at the door. 0s disables the watchdog.
+  target_timeout: 8s
+
   # Firmware-derived radar report controls.
   # These mirror stock firmware SubIDs 0x0156-0x0174.
   people_counting_report_enable: true
@@ -376,6 +382,11 @@ aqara_fp2:
   # learns the interference sources / room edge itself.
   interference_learning_button: { name: "Learn Interference" }
   edge_learning_button:         { name: "Learn Edge" }
+
+  # Undo a learning run: drop the learned map and go back to the
+  # interference_grid / edge_grid configured above.
+  forget_interference_map_button: { name: "Forget Learned Interference Map" }
+  forget_edge_map_button:         { name: "Forget Learned Edge Map" }
 
   # Global motion is derived from how far targets move (see target_moving_).
   # Both are tunable in Home Assistant and kept in flash.

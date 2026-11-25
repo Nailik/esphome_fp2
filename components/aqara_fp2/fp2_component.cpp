@@ -181,6 +181,13 @@ void FP2Component::setup() {
   // zones_ set (compile-time + rehydrated runtime) on the very first pass.
   rehydrate_zone_registry_();
 
+  // Keep what the YAML configured, so forget_learned_map() has something to
+  // go back to once apply_map_overrides_() has overwritten the live grids.
+  compiled_interference_grid_ = interference_grid_;
+  compiled_has_interference_grid_ = has_interference_grid_;
+  compiled_edge_grid_ = edge_grid_;
+  compiled_has_edge_grid_ = has_edge_grid_;
+
   // A map the radar learned itself replaces the compiled one, before
   // check_initialization_() writes the maps back to the radar.
   apply_map_overrides_();
@@ -251,6 +258,8 @@ void FP2Component::perform_reset_() {
   // A learning run cannot survive the radar being reset under it.
   learn_pending_[MAP_INTERFERENCE] = false;
   learn_pending_[MAP_EDGE] = false;
+  learn_started_ms_[MAP_INTERFERENCE] = 0;
+  learn_started_ms_[MAP_EDGE] = 0;
   last_radar_frame_millis_ = 0;
   last_heartbeat_millis_ = 0;
   // The cached reading belongs to the episode that is ending. Keeping it would
@@ -428,6 +437,7 @@ void FP2Component::configure_sleep_mode(uint16_t width, uint16_t length, uint8_t
 
   enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, (uint8_t) 9);
   last_work_mode_write_millis_ = millis();
+  work_mode_ = 9;
 
   // PROTO-02: seed the heartbeat keepalive on sleep-mode entry. Safe to
   // leave after WORK_MODE=9 even if the radar restarts immediately — this
@@ -444,6 +454,10 @@ void FP2Component::set_work_mode(uint8_t mode) {
   ESP_LOGI(TAG, "Setting radar work mode candidate to %u", mode);
   enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, mode);
   last_work_mode_write_millis_ = millis();
+  work_mode_ = mode;
+  // Leaving sleep mode this way must stop the sleep heartbeat keepalive.
+  if (mode != 9)
+    sleep_mode_active_ = false;
 }
 
 void FP2Component::set_ai_target_filter_enabled(bool enabled) {
@@ -500,6 +514,7 @@ void FP2Component::trigger_learning(AttrId attr) {
   // Marks this run as ours: only a report that answers a run we started may
   // replace the configured map - see handle_learned_map_report_().
   learn_pending_[kind] = true;
+  learn_started_ms_[kind] = millis();
   ESP_LOGI(TAG, "Learning 0x%04X started", (uint16_t) attr);
   enqueue_command_(OpCode::WRITE, attr, true);
 }
@@ -672,9 +687,13 @@ void FP2Component::handle_learned_map_report_(AttrId attr_id, const std::vector<
   }
 
   learn_pending_[kind] = false;
+  learn_started_ms_[kind] = 0;
 
   GridMap &target = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
   bool &has = kind == MAP_INTERFERENCE ? has_interference_grid_ : has_edge_grid_;
+  // The 40 above, and the 28 the rows-14-19 check starts from, are 20 rows of
+  // 2 bytes. Both are wrong the moment GridMap stops being that.
+  static_assert(std::tuple_size<GridMap>::value == 40, "GridMap must be 20 rows of 2 bytes");
   std::copy(payload.begin() + map_offset, payload.begin() + map_offset + 40, target.begin());
   has = false;
   for (auto b : target) {
@@ -719,6 +738,64 @@ void FP2Component::publish_map_grid_sensor_(uint8_t kind) {
     }
   }
   sensor->publish_state(any_cell ? grid_to_hex_card_format(grid) : std::string());
+}
+
+// A run the radar never answers would otherwise leave learn_pending_ set for
+// the rest of the uptime, and every later press of that button would be
+// rejected as a repeat. The radar gives no "learning failed" report, so the
+// only way to notice is the clock. The ceiling is deliberately generous: a
+// real run on FW 100 finishes in well under a minute, so anything past three
+// minutes is a run that is not coming back.
+void FP2Component::check_learning_timeout_() {
+  const uint32_t now = millis();
+  for (uint8_t kind = MAP_INTERFERENCE; kind <= MAP_EDGE; kind++) {
+    if (!learn_pending_[kind] || learn_started_ms_[kind] == 0)
+      continue;
+    if (now - learn_started_ms_[kind] <= LEARN_TIMEOUT_MS)
+      continue;
+    learn_pending_[kind] = false;
+    learn_started_ms_[kind] = 0;
+    ESP_LOGW(TAG, "Learning run for the %s map timed out after %us - the radar reported no map",
+             map_kind_name(kind), (unsigned) (LEARN_TIMEOUT_MS / 1000));
+  }
+}
+
+// Drop a learned map and go back to the one the YAML configured. Without this
+// a learning run is permanent: apply_map_overrides_() prefers the NVS blob at
+// every boot, so interference_grid / edge_grid in the config are dead for the
+// life of the flash.
+void FP2Component::forget_learned_map(uint8_t kind) {
+  // ESPHome preferences have no erase. Storing a blob whose version does not
+  // match makes load_map_override_() reject it, which is exactly "absent".
+  FP2MapOverride cleared{};
+  cleared.version = 0;
+  auto pref = global_preferences->make_preference<FP2MapOverride>(fnv1_hash(map_override_key(kind)));
+  pref.save(&cleared);
+  global_preferences->sync();
+
+  GridMap &target = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
+  bool &has = kind == MAP_INTERFERENCE ? has_interference_grid_ : has_edge_grid_;
+  target = kind == MAP_INTERFERENCE ? compiled_interference_grid_ : compiled_edge_grid_;
+  has = kind == MAP_INTERFERENCE ? compiled_has_interference_grid_ : compiled_has_edge_grid_;
+
+  // A learning run still in flight would otherwise overwrite what we just
+  // restored when its report arrives.
+  learn_pending_[kind] = false;
+  learn_started_ms_[kind] = 0;
+
+  publish_map_grid_sensor_(kind);
+
+  // init writes both maps unconditionally, so an all-zero configured map is
+  // still a write: it is what tells the radar to stop using the learned one.
+  const AttrId attr = kind == MAP_INTERFERENCE ? AttrId::INTERFERENCE_MAP : AttrId::EDGE_MAP;
+  enqueue_command_blob2_(attr, std::vector<uint8_t>(target.begin(), target.end()));
+  ESP_LOGI(TAG, "Forgot the learned %s map - restored the configured one (%s)",
+           map_kind_name(kind), has ? "cells set" : "empty");
+}
+
+void FP2ForgetMapButton::press_action() {
+  if (this->parent_ != nullptr)
+    this->parent_->forget_learned_map(this->kind_);
 }
 
 bool FP2Component::load_global_zone_override_(FP2GlobalZoneOverride *out) {
@@ -1716,6 +1793,7 @@ void FP2Component::loop() {
   check_initialization_();
   check_heartbeat_watchdog_();
   check_target_stale_();
+  check_learning_timeout_();
   process_command_queue_();
   check_motion_timeout_();
 
@@ -1732,7 +1810,7 @@ void FP2Component::loop() {
 }
 
 void FP2Component::check_heartbeat_watchdog_() {
-  if (!init_done_)
+  if (!init_done_ || work_mode_ != 3)
     return;
   // Before the first 0x0001 heartbeat there is no heartbeat to measure from,
   // so fall back to the last frame of any kind. A radar that emits one valid
@@ -1899,6 +1977,7 @@ void FP2Component::check_initialization_() {
     // 1. Basic Settings
     enqueue_command_(OpCode::WRITE, AttrId::WORK_MODE, (uint8_t) 3);
     last_work_mode_write_millis_ = millis();
+    work_mode_ = 3;
     enqueue_command_(OpCode::WRITE, AttrId::MOTION_DETECT, (uint8_t) 1);
     enqueue_command_(OpCode::WRITE, AttrId::PRESENCE_DETECT, (uint8_t) 1);
     enqueue_command_(OpCode::WRITE, AttrId::MONITOR_MODE, (uint8_t) 0);
@@ -2531,7 +2610,8 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
             // The radar sends this once on boot. Seeing it long after we
             // configured it, without having changed the mode ourselves,
             // means the radar restarted behind our back.
-            if (init_done_ && millis() - last_work_mode_write_millis_ > WORK_MODE_REPORT_GRACE_MS) {
+            if (init_done_ && work_mode_ == 3 &&
+                millis() - last_work_mode_write_millis_ > WORK_MODE_REPORT_GRACE_MS) {
               restart_initialization_("radar rebooted");
             }
             break;
@@ -2794,7 +2874,13 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
     // Target layout: id(1), X s16(2), Y s16(2), ... (big endian)
     int16_t x = (int16_t)((binary_data[offset + 1] << 8) | binary_data[offset + 2]);
     int16_t y = (int16_t)((binary_data[offset + 3] << 8) | binary_data[offset + 4]);
-    float dist_m = sqrtf((float) x * x + (float) y * y) * METERS_PER_UNIT;
+    // Measure from where the sensor actually is. In corner mode the unit sits
+    // at raw (300, 0) - that is grid (0, 0) under the (300 - rawX) / 50
+    // mapping - so the raw origin is 3 m away from it along X. Measuring from
+    // (0, 0) there reported ~2.55 m for somebody standing 1 m diagonally in
+    // front of the unit. Wall mode does have the sensor at the raw origin.
+    const float dx = (float) x - corner_mounted_sensor_raw_x_();
+    float dist_m = sqrtf(dx * dx + (float) y * y) * METERS_PER_UNIT;
     if (std::isnan(nearest) || dist_m < nearest)
       nearest = dist_m;
     if (target_moving_(binary_data[offset], x, y, now))

@@ -379,6 +379,20 @@ protected:
   AttrId attr_{AttrId::INVALID};
 };
 
+// Undoes a learning run: drops the saved map and puts the YAML-configured
+// interference_grid / edge_grid back, on the device and in NVS. Without it a
+// single press of a learning button makes the configured map permanently
+// unreachable short of erasing flash. kind matches FP2Component::MapKind.
+class FP2ForgetMapButton : public button::Button {
+public:
+  void set_parent(FP2Component *parent, uint8_t kind) { parent_ = parent; kind_ = kind; }
+
+protected:
+  void press_action() override;
+  FP2Component *parent_{nullptr};
+  uint8_t kind_{0};
+};
+
 // The runtime-tunable numbers: the two motion parameters (see target_moving_())
 // and the radar temperature offset. Each is persisted to flash under its own
 // entity-derived NVS key, so a value set in Home Assistant survives a reboot.
@@ -438,6 +452,12 @@ public:
   void set_motion_timeout_s(float s) { motion_timeout_ms_ = (uint32_t) (s * 1000.0f); }
   void set_motion_distance_cm(float cm) { motion_distance_cm_ = cm; }
   void set_mounting_position(uint8_t pos) { mounting_position_ = pos; }
+  // Raw X of the sensor itself: 0x02/0x03 are the two corner mountings, where
+  // the unit sits at raw X = +300 (grid column 0); wall mounting puts it at
+  // the raw origin. Used to measure target distance from the right point.
+  float corner_mounted_sensor_raw_x_() const {
+    return (mounting_position_ == 0x02 || mounting_position_ == 0x03) ? 300.0f : 0.0f;
+  }
   void set_left_right_reverse(bool val) { left_right_reverse_ = val; }
   void set_proximity(uint8_t val) { proximity_ = val; }
   // Stale-target watchdog: 0 disables it, otherwise the longest gap in the
@@ -640,6 +660,9 @@ public:
   void set_interference_auto_enabled(bool enabled);
   // Start one learning run on the radar (see FP2LearnButton).
   void trigger_learning(AttrId attr);
+  // Discard a learned map and restore the configured one (see
+  // FP2ForgetMapButton). kind is a MapKind.
+  void forget_learned_map(uint8_t kind);
 
   // Grid format conversion
   std::string grid_to_hex_card_format(const GridMap &grid);
@@ -827,6 +850,12 @@ protected:
   // overwrite the configured map - see handle_learned_map_report_(). Cleared
   // by perform_reset_(), since a run cannot survive a radar reset.
   bool learn_pending_[2]{false, false};
+  // When each pending run was started, so one the radar never answers cannot
+  // block that button for the rest of the uptime. 0 = no run.
+  uint32_t learn_started_ms_[2]{0, 0};
+  // Generous on purpose: a real run on FW 100 finishes in well under a minute.
+  static const uint32_t LEARN_TIMEOUT_MS = 180000;
+  void check_learning_timeout_();
   bool load_map_override_(uint8_t kind, FP2MapOverride *out);
   void save_map_override_(uint8_t kind, const GridMap &grid);
   void apply_map_overrides_();
@@ -879,6 +908,10 @@ protected:
   bool reset_armed_{false};
   static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
   uint32_t last_work_mode_write_millis_{0};
+  // Last WORK_MODE written. The watchdog only runs in Zone Detection (3):
+  // switching to fall (8) or sleep (9) restarts the radar into other
+  // firmware, which must not be mistaken for a crash.
+  uint8_t work_mode_{3};
 
   // Configuration State
   uint8_t mounting_position_{0x01}; // Default Wall
@@ -902,10 +935,16 @@ protected:
   // Grids (Optional)
   GridMap interference_grid_{};
   bool has_interference_grid_{false};
+  // What the YAML configured, kept because apply_map_overrides_() overwrites
+  // the live grid above with a learned map at boot.
+  GridMap compiled_interference_grid_{};
+  bool compiled_has_interference_grid_{false};
   GridMap exit_grid_{};
   bool has_exit_grid_{false};
   GridMap edge_grid_{};
   bool has_edge_grid_{false};
+  GridMap compiled_edge_grid_{};
+  bool compiled_has_edge_grid_{false};
 
   // Global zone
   uint8_t global_presence_sensitivity_{2}; // Default Medium

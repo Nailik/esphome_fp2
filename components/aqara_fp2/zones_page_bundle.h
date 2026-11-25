@@ -1677,8 +1677,10 @@ static const char ZONES_PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
     if (mp === 'left_upper_corner' || mp === 'right_upper_corner') {
       // 14 x 14 cells of 50 raw units (1 cm per unit): X = +300 is the left
       // edge, X = -400 the right one where the radar clamps.
-      var gx = (300 - rawX) / 50.0;
-      return { gridX: gx > 14.0 ? 14.0 : gx, gridY: rawY / 50.0 };
+      // Clamp both axes - see card.js: gridY was unclamped, so a target past
+      // 7 m vanished instead of being drawn at the far edge.
+      var clampCell = function (v) { return v < 0 ? 0 : (v > 14.0 ? 14.0 : v); };
+      return { gridX: clampCell((300 - rawX) / 50.0), gridY: clampCell(rawY / 50.0) };
     }
     return { gridX: rawX * 0.01, gridY: rawY * 0.01 };
   }
