@@ -164,6 +164,20 @@ MOUNTING_POSITIONS = {
     "right_corner": 0x03,
 }
 
+# The YAML spells the corner mounts short; the firmware's mounting-position
+# text sensor (get_mounting_position_string_()) and every JS consumer -
+# card.js, fp2-card-lite.js and the device's own /zones page - spell them
+# "left_upper_corner" / "right_upper_corner". map_config_json used to carry
+# the YAML spelling verbatim, which none of those three accept: each fell
+# through to its "wall" branch and drew corner-mounted targets with the wall
+# transform (card.js even logs `Unrecognized mounting_position`). Emit the
+# same string the text sensor publishes so the two agree.
+MOUNTING_POSITION_JSON_NAMES = {
+    "wall": "wall",
+    "left_corner": "left_upper_corner",
+    "right_corner": "right_upper_corner",
+}
+
 PROXIMITY_LEVELS = {
     "far": 0,
     "medium": 1,
@@ -713,7 +727,7 @@ async def to_code(config):
 
     # Generate map config JSON data at compile time
     map_config_data = {
-        "mounting_position": config[CONF_MOUNTING_POSITION],
+        "mounting_position": MOUNTING_POSITION_JSON_NAMES[str(config[CONF_MOUNTING_POSITION])],
         "left_right_reverse": config[CONF_LEFT_RIGHT_REVERSE],
     }
 

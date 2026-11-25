@@ -91,6 +91,18 @@ grid is written. They are warnings, not errors: the radar takes every mask as
 written, and what it does with a doubly-claimed cell is its own business, so
 the check reports rather than decides.
 
+#### Mounting position naming
+
+`mounting_position` takes `wall`, `left_corner` or `right_corner` in YAML. The
+firmware's mounting-position text sensor and every JS consumer — `card.js`,
+`fp2-card-lite.js` and the device's own `/zones` page — use the longer
+`left_upper_corner` / `right_upper_corner` spelling, and the compile-time map
+config now emits that spelling too so the two agree. Previously it carried the
+short YAML form, which none of those three accepted: each fell through to its
+`wall` branch and drew corner-mounted targets with the wall transform. All
+three also accept the short spelling now, so a card configured by hand or a
+device still running older firmware keeps working.
+
 ### Firmware-Derived Radar Options
 
 The ESPHome component exposes several SubIDs found in the stock firmware dump. Defaults preserve the current component behavior for the already-used report streams.

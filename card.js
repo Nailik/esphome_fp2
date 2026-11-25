@@ -2185,7 +2185,15 @@ class AqaraFP2Card extends HTMLElement {
     // Honor the documented card-level `mounting_position` config as a fallback
     // when the device response omits it (WR-01). Placed before the whitelist
     // check so the override is enum-validated too; the "wall" default is kept.
+    // Firmware built before the map-config fix emitted the YAML spelling here
+    // ("left_corner" / "right_corner"), and the card's own mounting_position
+    // option is documented with the short names too. Accept both.
+    const MOUNTING_POSITION_ALIASES = {
+      left_corner: "left_upper_corner",
+      right_corner: "right_upper_corner",
+    };
     let mountingPosition = mapConfig.mounting_position || this.config.mounting_position;
+    mountingPosition = MOUNTING_POSITION_ALIASES[mountingPosition] || mountingPosition;
     if (!KNOWN_MOUNTING_POSITIONS.includes(mountingPosition)) {
       if (mountingPosition !== undefined) {
         console.warn(`[FP2 Card] Unrecognized mounting_position "${mountingPosition}", falling back to "wall"`);

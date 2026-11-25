@@ -508,6 +508,14 @@ static const char ZONES_PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
   // already emits these) so the live-overlay target transform matches
   // card.js's FP2Geometry mirror/mount handling instead of assuming "wall".
   var mountingPosition = 'wall';
+  // Firmware built before the map-config fix sent the YAML spelling
+  // ('left_corner' / 'right_corner'); everything below compares against the
+  // long form the mounting-position text sensor publishes. Accept both.
+  function normaliseMounting(mp) {
+    if (mp === 'left_corner') return 'left_upper_corner';
+    if (mp === 'right_corner') return 'right_upper_corner';
+    return mp;
+  }
   var leftRightReverse = false;
 
   function escapeHtml(value) {
@@ -1576,7 +1584,7 @@ static const char ZONES_PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
   // handleImportClick() below, so the UI never silently claims to
   // round-trip a field it actually discards (13-05-PLAN.md prohibition).
   function mergeImportedMapConfig(data) {
-    mountingPosition = data.mounting_position || mountingPosition;
+    mountingPosition = normaliseMounting(data.mounting_position) || mountingPosition;
     leftRightReverse = data.left_right_reverse === true;
 
     editorState.interference = FP2Codec.hexToGrid(data.interference_grid);
@@ -1950,7 +1958,7 @@ static const char ZONES_PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
         return resp.json();
       })
       .then(function (data) {
-        mountingPosition = data.mounting_position || 'wall';
+        mountingPosition = normaliseMounting(data.mounting_position) || 'wall';
         leftRightReverse = data.left_right_reverse === true;
 
         // Seed editorState from this SAME response (13-RESEARCH.md Pattern

@@ -91,7 +91,15 @@ class AqaraFP2LiteCard extends HTMLElement {
     this._device = config.entity_prefix.replace(/^[^.]+\./, "");
     this._targetsEntity = config.targets_entity || `${config.entity_prefix}_targets`;
     this._presenceEntity = `binary_sensor.${this._device}_global_presence`;
-    this._mounting = config.mounting_position || "left_upper_corner";
+    // Firmware built before the map-config fix emitted the YAML spelling here
+    // ("left_corner" / "right_corner"), and the card's own mounting_position
+    // option is documented with the short names too. Accept both.
+    const mountingAliases = {
+      left_corner: "left_upper_corner",
+      right_corner: "right_upper_corner",
+    };
+    const rawMounting = config.mounting_position || "left_upper_corner";
+    this._mounting = mountingAliases[rawMounting] || rawMounting;
     this._reverse = config.left_right_reverse === true;
     this._built = false;
   }
