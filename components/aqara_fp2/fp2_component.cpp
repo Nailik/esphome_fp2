@@ -181,6 +181,10 @@ void FP2Component::setup() {
   // zones_ set (compile-time + rehydrated runtime) on the very first pass.
   rehydrate_zone_registry_();
 
+  // A map the radar learned itself replaces the compiled one, before
+  // check_initialization_() writes the maps back to the radar.
+  apply_map_overrides_();
+
   // CR-01 fix (12-REVIEW iter2): fix zones_'s backing storage now, before the
   // web-handler registration block below can ever let the httpd task start
   // reading it concurrently. 32 is the protocol's hard ceiling on zone IDs
@@ -234,9 +238,19 @@ void FP2Component::setup() {
 }
 
 void FP2Component::perform_reset_() {
+  last_reset_millis_ = millis();
+  // "A reset has happened", as a flag rather than last_reset_millis_ > 0:
+  // millis() is 0 for the first millisecond of each 49.7-day period, so a
+  // reset stamped there - the one setup() performs, most of all - would read
+  // as "never reset" and the no-traffic retry would never arm. Set once and
+  // never cleared: the component does not go back to never having reset.
+  reset_armed_ = true;
   command_queue_.clear();
   waiting_for_ack_attr_id_ = AttrId::INVALID;
   init_done_ = false;
+  // A learning run cannot survive the radar being reset under it.
+  learn_pending_[MAP_INTERFERENCE] = false;
+  learn_pending_[MAP_EDGE] = false;
   last_radar_frame_millis_ = 0;
   last_heartbeat_millis_ = 0;
   // The cached reading belongs to the episode that is ending. Keeping it would
@@ -263,13 +277,17 @@ void FP2Component::set_location_reporting_enabled(bool enabled) {
   this->location_reporting_active_ = enabled;
   this->enqueue_command_(OpCode::WRITE, AttrId::LOCATION_REPORT_ENABLE, enabled);
   if (!enabled) {
-    // Clear the sensor state when location reporting is disabled, and stop the
-    // stale-target watchdog from retracting a list that is already gone.
-    targets_nonempty_ = false;
+    // Retract the list before disarming the watchdog.
+    //
+    // set_has_state(false) only clears a local flag - it pushes nothing to the
+    // API - so a text sensor that last carried targets keeps that value in HA,
+    // and every card reading it goes on drawing a target the radar is no
+    // longer reporting. publish_empty_targets_() sends the explicit empty list
+    // (and clears count/distance with it), which is also what the stale-target
+    // watchdog does; zeroing last_location_report_millis_ afterwards stops
+    // check_target_stale_() retracting a list that is already gone.
+    publish_empty_targets_();
     last_location_report_millis_ = 0;
-    if (this->target_tracking_sensor_ != nullptr) {
-      this->target_tracking_sensor_->set_has_state(false);
-    }
   }
 }
 
@@ -441,6 +459,13 @@ void FP2Component::calibrate_empty_room() {
 
 void FP2Component::reset_radar() {
   ESP_LOGI(TAG, "Resetting radar module via diagnostic action");
+  // Someone asking for a reset by hand is the one signal that the thing the
+  // retry gave up on may have been fixed (wiring, power, a reseated module),
+  // so give them the full sequence again. Not in perform_reset_(): the retry
+  // in check_initialization_() calls that itself, and clearing the counter
+  // there would make the retry unbounded.
+  no_traffic_retries_ = 0;
+  no_traffic_gave_up_ = false;
   perform_reset_();
 }
 
@@ -452,6 +477,31 @@ void FP2Component::set_edge_auto_enabled(bool enabled) {
 void FP2Component::set_interference_auto_enabled(bool enabled) {
   ESP_LOGI(TAG, "Setting interference auto detection to %s", enabled ? "enabled" : "disabled");
   enqueue_command_(OpCode::WRITE, AttrId::INTERFERENCE_AUTO_ENABLE, enabled);
+}
+
+void FP2LearnButton::press_action() {
+  if (this->parent_ != nullptr)
+    this->parent_->trigger_learning(this->attr_);
+}
+
+void FP2Component::trigger_learning(AttrId attr) {
+  if (!init_done_) {
+    ESP_LOGW(TAG, "Learning 0x%04X ignored: radar not initialised yet", (uint16_t) attr);
+    return;
+  }
+  const uint8_t kind = attr == AttrId::INTERFERENCE_AUTO_ENABLE ? MAP_INTERFERENCE : MAP_EDGE;
+  // Each press queues a WRITE the radar has to ACK, so repeated taps would
+  // queue N redundant enables. One run at a time is enough.
+  if (learn_pending_[kind]) {
+    ESP_LOGW(TAG, "Learning 0x%04X is already running - ignoring the repeat press",
+             (uint16_t) attr);
+    return;
+  }
+  // Marks this run as ours: only a report that answers a run we started may
+  // replace the configured map - see handle_learned_map_report_().
+  learn_pending_[kind] = true;
+  ESP_LOGI(TAG, "Learning 0x%04X started", (uint16_t) attr);
+  enqueue_command_(OpCode::WRITE, attr, true);
 }
 
 // RUN-02/RUN-04 (09-03): NVS override load/save helpers using ESPHome's
@@ -522,6 +572,153 @@ void FP2Component::save_zone_name_(uint8_t zone_id, const char *name) {
   // Finding 3 (12-01) - do not omit: a name write is not durable until this
   // sync() flushes it to flash.
   global_preferences->sync();
+}
+
+static const char *map_kind_name(uint8_t kind) { return kind == 0 ? "interference" : "edge"; }
+
+static const char *map_override_key(uint8_t kind) {
+  return kind == 0 ? "fp2_map_override_interference" : "fp2_map_override_edge";
+}
+
+bool FP2Component::load_map_override_(uint8_t kind, FP2MapOverride *out) {
+  auto pref = global_preferences->make_preference<FP2MapOverride>(fnv1_hash(map_override_key(kind)));
+  return pref.load(out) && out->version == FP2_MAP_OVERRIDE_VERSION;
+}
+
+void FP2Component::save_map_override_(uint8_t kind, const GridMap &grid) {
+  // Skip an identical rewrite. sync() below is a blocking, full NVS commit and
+  // this is reached from the UART frame path in loop(), so re-committing a map
+  // the radar reported unchanged would stall the main loop and wear flash for
+  // no benefit.
+  FP2MapOverride existing;
+  if (load_map_override_(kind, &existing) && existing.grid == grid) {
+    ESP_LOGD(TAG, "Learned %s map is unchanged - not rewriting NVS", map_kind_name(kind));
+    return;
+  }
+  FP2MapOverride ov{FP2_MAP_OVERRIDE_VERSION, grid};
+  auto pref = global_preferences->make_preference<FP2MapOverride>(fnv1_hash(map_override_key(kind)));
+  pref.save(&ov);
+  // Same durability gap as the zone overrides: not persisted until sync().
+  global_preferences->sync();
+}
+
+void FP2Component::apply_map_overrides_() {
+  for (uint8_t kind = MAP_INTERFERENCE; kind <= MAP_EDGE; kind++) {
+    FP2MapOverride ov;
+    if (!load_map_override_(kind, &ov))
+      continue;
+    GridMap &target = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
+    bool &has = kind == MAP_INTERFERENCE ? has_interference_grid_ : has_edge_grid_;
+    target = ov.grid;
+    // An all-zero learned map means "nothing marked" and is still written at
+    // init (both maps are written unconditionally), so has_ can stay false
+    // there without changing what reaches the radar - but the card should show
+    // the learned map either way.
+    has = false;
+    for (auto b : target) {
+      if (b) {
+        has = true;
+        break;
+      }
+    }
+    ESP_LOGI(TAG, "Applying saved learned %s map from NVS (%s)", map_kind_name(kind),
+             has ? "cells set" : "empty");
+    // The grid sensors published the compiled map while the generated setup()
+    // ran, before this component's setup() - replace what they are showing.
+    publish_map_grid_sensor_(kind);
+  }
+}
+
+// The radar reports 0x0110 / 0x0107 back after a learning run (see
+// FP2LearnButton). Keep the learned map as the live one, persist it and show
+// it on the card; otherwise the next boot's map write wipes what was learned.
+void FP2Component::handle_learned_map_report_(AttrId attr_id, const std::vector<uint8_t> &payload) {
+  const uint8_t kind = attr_id == AttrId::INTERFERENCE_MAP ? MAP_INTERFERENCE : MAP_EDGE;
+
+  // Only a learning run this component started may replace the configured
+  // map. Acting on every inbound report would mean one unsolicited frame -
+  // the radar echoing the map it keeps in its own flash after a boot, say -
+  // permanently replaced the YAML interference_grid or edge_grid in NVS on a
+  // device whose learning button was never pressed, with no way back short of
+  // erasing flash.
+  if (!learn_pending_[kind]) {
+    ESP_LOGI(TAG, "Ignoring unsolicited learned %s map report: no learning run pending",
+             map_kind_name(kind));
+    return;
+  }
+
+  // Two framings are seen for this blob: [SubID 2][Type 1 = 0x06][Len 2][40
+  // bytes] = 45 bytes, and the same without the length field = 43. Accept
+  // exactly those two, and when the length field is present require it to say
+  // 40. Taking "the last 40 bytes" of any other frame shifts every row, and
+  // the save below would then make that garbage permanent.
+  size_t map_offset = 0;
+  bool layout_ok = false;
+  if (payload.size() >= 3 && payload[2] == 0x06) {
+    if (payload.size() == 43) {
+      map_offset = 3;
+      layout_ok = true;
+    } else if (payload.size() == 45 &&
+               (((uint16_t) payload[3] << 8) | (uint16_t) payload[4]) == 40) {
+      map_offset = 5;
+      layout_ok = true;
+    }
+  }
+  if (!layout_ok) {
+    ESP_LOGW(TAG, "Learned %s map report malformed (%u bytes, type 0x%02X) - ignored",
+             map_kind_name(kind), static_cast<unsigned>(payload.size()),
+             payload.size() > 2 ? payload[2] : 0);
+    return;
+  }
+
+  learn_pending_[kind] = false;
+
+  GridMap &target = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
+  bool &has = kind == MAP_INTERFERENCE ? has_interference_grid_ : has_edge_grid_;
+  std::copy(payload.begin() + map_offset, payload.begin() + map_offset + 40, target.begin());
+  has = false;
+  for (auto b : target) {
+    if (b) {
+      has = true;
+      break;
+    }
+  }
+  // grid_to_hex_card_format() emits rows 0-13 of the 20 the protocol carries,
+  // so a cell the radar marked in rows 14-19 is stored and written back to the
+  // radar correctly but cannot be shown on the card - and would be dropped if
+  // the user exported YAML from the card. Say so instead of losing it quietly.
+  for (size_t i = 28; i < target.size(); i++) {
+    if (target[i] != 0) {
+      ESP_LOGW(TAG,
+               "Learned %s map marks cells in protocol rows 14-19, which the card format cannot "
+               "show - the full map is still stored and sent to the radar",
+               map_kind_name(kind));
+      break;
+    }
+  }
+  save_map_override_(kind, target);
+  publish_map_grid_sensor_(kind);
+  ESP_LOGI(TAG, "Radar reported a learned %s map (%s), saved", map_kind_name(kind),
+           has ? "cells set" : "empty");
+}
+
+void FP2Component::publish_map_grid_sensor_(uint8_t kind) {
+  text_sensor::TextSensor *sensor =
+      kind == MAP_INTERFERENCE ? interference_grid_sensor_ : edge_label_grid_sensor_;
+  if (sensor == nullptr)
+    return;
+  const GridMap &grid = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
+  // An all-zero map means "no grid", which is also when json_get_map_data()
+  // omits the key altogether. Publish the empty string rather than 56 zeros so
+  // both surfaces say the same thing; card.js decodes either to an empty grid.
+  bool any_cell = false;
+  for (auto b : grid) {
+    if (b != 0) {
+      any_cell = true;
+      break;
+    }
+  }
+  sensor->publish_state(any_cell ? grid_to_hex_card_format(grid) : std::string());
 }
 
 bool FP2Component::load_global_zone_override_(FP2GlobalZoneOverride *out) {
@@ -1388,12 +1585,21 @@ void FP2Component::prune_motion_tracks_(uint32_t now) {
       m.used = false;
 }
 
-void FP2Component::force_motion_off_() {
-  for (auto &m : motion_tracks_)
-    m.used = false;
+// Publishes motion off without touching the tracks. Used where the targets
+// may still be present and only the motion state has expired.
+void FP2Component::publish_motion_off_() {
   if (global_motion_sensor_ != nullptr &&
       (!global_motion_sensor_->has_state() || global_motion_sensor_->state))
     global_motion_sensor_->publish_state(false);
+}
+
+// Publishes motion off AND forgets every track. Only for events that mean the
+// targets themselves are gone or meaningless: global presence going to 0, and
+// a radar reset/re-initialisation.
+void FP2Component::force_motion_off_() {
+  for (auto &m : motion_tracks_)
+    m.used = false;
+  publish_motion_off_();
 }
 
 // The target stream can stop (a lost target, a learning run) with motion left
@@ -1404,7 +1610,12 @@ void FP2Component::check_motion_timeout_() {
   uint32_t now = millis();
   if (now - last_motion_ms_ > motion_timeout_ms_) {
     last_motion_ms_ = 0;
-    force_motion_off_();
+    // Publish only. These tracks belong to targets the radar may still be
+    // reporting, and dropping them would reset each one's reference position
+    // to wherever the target is now - discarding the displacement a slowly
+    // creeping target has built up, so it would have to start accumulating
+    // towards motion_distance from scratch.
+    publish_motion_off_();
   }
 }
 
@@ -1521,11 +1732,36 @@ void FP2Component::loop() {
 }
 
 void FP2Component::check_heartbeat_watchdog_() {
-  if (!init_done_ || last_heartbeat_millis_ == 0)
+  if (!init_done_)
     return;
-  if (millis() - last_heartbeat_millis_ > HEARTBEAT_TIMEOUT_MS) {
-    restart_initialization_("heartbeat lost");
+  // Before the first 0x0001 heartbeat there is no heartbeat to measure from,
+  // so fall back to the last frame of any kind. A radar that emits one valid
+  // frame after a reset and then dies before its first heartbeat used to be
+  // covered by neither watchdog: that frame sets last_radar_frame_millis_,
+  // check_initialization_() sets init_done_, and the no-traffic retry above is
+  // then skipped by the init_done_ early-out while this function returned
+  // early on last_heartbeat_millis_ == 0.
+  const bool have_heartbeat = last_heartbeat_millis_ != 0;
+  const uint32_t since_ms = have_heartbeat ? last_heartbeat_millis_ : last_radar_frame_millis_;
+  if (since_ms == 0)
+    return;
+  if (millis() - since_ms > HEARTBEAT_TIMEOUT_MS) {
+    restart_initialization_(have_heartbeat ? "heartbeat lost" : "no heartbeat after first frame");
   }
+}
+
+// An open save batch is tracked by pending_save_attr_ids_ and only closed
+// when each queued write ACKs or exhausts MAX_RETRIES in
+// process_command_queue_(). Anything that clears command_queue_ out from under
+// it therefore has to fail the batch explicitly, or save_pending() never goes
+// back to false and the web UI waits on "saving" for ever.
+void FP2Component::fail_pending_save_batch_(const std::string &reason) {
+  if (pending_save_attr_ids_.empty())
+    return;
+  save_failed_ = true;
+  save_error_ = reason;
+  pending_save_attr_ids_.clear();
+  save_batch_in_progress_ = false;
 }
 
 // Drop everything, reset the radar and let check_initialization_() run again
@@ -1533,13 +1769,12 @@ void FP2Component::check_heartbeat_watchdog_() {
 // announces a fresh boot (work_mode report) after we already configured it.
 void FP2Component::restart_initialization_(const char *reason) {
   ESP_LOGW(TAG, "Radar re-initialization (%s)", reason);
+  // The radar has been talking up to now, so the no-traffic retry sequence
+  // starts fresh for this new episode.
+  no_traffic_retries_ = 0;
+  no_traffic_gave_up_ = false;
   // The queued writes are dropped below, so an open save batch can't finish.
-  if (!pending_save_attr_ids_.empty()) {
-    save_failed_ = true;
-    save_error_ = std::string("radar re-initialized (") + reason + ")";
-    pending_save_attr_ids_.clear();
-    save_batch_in_progress_ = false;
-  }
+  fail_pending_save_batch_(std::string("radar re-initialized (") + reason + ")");
   // The radar comes back in its default work mode; init writes Zone Detection.
   sleep_mode_active_ = false;
   if (this->operating_mode_select_ != nullptr) {
@@ -1609,8 +1844,51 @@ void FP2Component::check_initialization_() {
   if (init_done_)
     return;
 
+  // Nothing at all from the radar since the reset: pulse the reset pin again.
+  // Without this a soft reboot that leaves the radar silent stays silent until
+  // the host is power-cycled by hand.
+  //
+  // Bounded, with exponential backoff. perform_reset_() blocks the main loop
+  // for 100ms and re-arms this same gate, so an unbounded retry would pulse
+  // the reset pin, log a warning and stall the loop every 10s for the rest of
+  // the device's uptime whenever the radar is simply not going to answer -
+  // module absent, UART wired to the wrong pins, wrong baud rate, every frame
+  // failing CRC. Back off 10s, 20s, 40s, 80s, 160s and then stop, logging the
+  // reason once. The sequence starts over on a successful init below, on
+  // restart_initialization_(), and on a reset asked for by hand
+  // (reset_radar()).
+  if (last_radar_frame_millis_ == 0 && reset_pin_ != nullptr && reset_armed_) {
+    if (no_traffic_retries_ < MAX_NO_TRAFFIC_RETRIES) {
+      const uint32_t backoff_ms = NO_TRAFFIC_RETRY_MS << no_traffic_retries_;
+      if (millis() - last_reset_millis_ > backoff_ms) {
+        no_traffic_retries_++;
+        ESP_LOGW(TAG,
+                 "No radar traffic %lums after reset (attempt %u of %u), resetting the radar again",
+                 (unsigned long) (millis() - last_reset_millis_),
+                 (unsigned) no_traffic_retries_, (unsigned) MAX_NO_TRAFFIC_RETRIES);
+        // perform_reset_() drops the command queue, so a save batch that is
+        // still waiting for an ACK could never finish or time out, and
+        // save_pending() would stay true for ever. Fail it here, exactly as
+        // restart_initialization_() does for the same reason.
+        fail_pending_save_batch_("radar did not respond after reset");
+        perform_reset_();
+        return;
+      }
+    } else if (!no_traffic_gave_up_) {
+      no_traffic_gave_up_ = true;
+      ESP_LOGE(TAG,
+               "Radar still silent after %u reset attempts - giving up. Check the UART wiring, "
+               "the baud rate and the reset pin.",
+               (unsigned) MAX_NO_TRAFFIC_RETRIES);
+    }
+  }
+
   if (last_radar_frame_millis_ > 0) {
     ESP_LOGI(TAG, "Radar traffic received. Starting initialization sequence...");
+    // The radar is talking, so a later silent spell starts its retry sequence
+    // from the shortest backoff again.
+    no_traffic_retries_ = 0;
+    no_traffic_gave_up_ = false;
     init_done_ = true;
 
     // 0. Like the stock firmware: tell the radar how it is mounted and read
@@ -1727,6 +2005,25 @@ void FP2Component::check_initialization_() {
         grid = ov.grid;
         sensitivity = ov.sensitivity;
         zone_type = ov.zone_type;
+
+        // Mirror the override into the live FP2Zone, matching what
+        // save_zone_to_sensor() already does on the save itself. Without this
+        // the radar runs the override while json_get_map_data() keeps
+        // reporting the compiled values to GET /api/zones, the /zones editor,
+        // get_map_config and the map_sensor - and nothing corrects it later,
+        // because rehydrate_zone_registry_() skips every already-compiled id.
+        // A floorplan card drawing zone outlines from that data would place
+        // them on cells the radar is not using.
+        zone->grid = grid;
+        zone->sensitivity = sensitivity;
+        if (zone_type >= 0) {
+          zone->set_zone_type((uint8_t) zone_type);
+        } else {
+          zone->has_zone_type = false;
+        }
+        // No map_sensor publish here: step 6 of this same call publishes every
+        // active zone's map_sensor from zone->grid, which the assignment above
+        // has already replaced with the override.
       }
 
       // a. Send Zone Detect Setting (0x0114)
@@ -1821,6 +2118,10 @@ void FP2Component::check_initialization_() {
       zone->reset_motion();
     }
 
+    // This false is our own post-reset assumption, not something the radar
+    // reported, so it must not arm the motion presence gate: a person already
+    // present at boot produces no 0x0105 edge to correct it.
+    presence_reported_ = false;
     if (global_presence_sensor_ != nullptr) global_presence_sensor_->publish_state(false);
     last_motion_ms_ = 0;
     force_motion_off_();
@@ -2283,6 +2584,9 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
     case AttrId::PRESENCE_DETECT:
         if (payload.size() == 4 && payload[2]  == 0x00) {
             uint8_t state = payload[3];
+            // The radar has now told us what presence is, so the motion gate
+            // in handle_location_tracking_report_() can trust it.
+            presence_reported_ = true;
             if (global_presence_sensor_ != nullptr) {
               global_presence_sensor_->publish_state(state != 0);
             }
@@ -2431,6 +2735,12 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
       ESP_LOGI(TAG, "Received reset_absent_status report");
       break;
 
+    case AttrId::INTERFERENCE_MAP:
+    case AttrId::EDGE_MAP:
+      publish_radar_debug_("learned_map_report", attr_id, payload);
+      handle_learned_map_report_(attr_id, payload);
+      break;
+
     default:
       publish_radar_debug_("unhandled_report", attr_id, payload);
       ESP_LOGW(TAG, "Unhandled report 0x%04X (%s)", (uint16_t) attr_id, attr_id_to_string_(attr_id));
@@ -2495,15 +2805,44 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
 
   // Motion never shows while presence is off: the radar keeps streaming a
   // dropped track for a while after the person has gone.
-  bool presence_on = global_presence_sensor_ == nullptr ||
+  //
+  // The gate applies only once the radar has actually reported presence.
+  // global_presence_sensor_ is published from exactly two places: the
+  // unsolicited 0x0105 report, and the forced false at the end of
+  // check_initialization_(). A read of PRESENCE_DETECT cannot supply it -
+  // handle_response_() is observational and publishes nothing - so if nobody
+  // crosses a presence edge after init (a person already standing in the room
+  // at boot, or a 0x0105 that arrived mid-init and was overwritten by that
+  // forced false) the sensor stays false with no way back, and gating on it
+  // would suppress motion for as long as that person stays.
+  bool presence_on = global_presence_sensor_ == nullptr || !presence_reported_ ||
                      (global_presence_sensor_->has_state() && global_presence_sensor_->state);
   if (!presence_on)
     moving = false;
   if (moving)
     last_motion_ms_ = now;
+
+  // A frame carrying no targets is not evidence that motion stopped. The radar
+  // routinely drops a track for a frame or two mid-walk, and the per-track hold
+  // in target_moving_() cannot bridge that, because with count == 0 there is no
+  // track to consult: moving stays false and this published motion off at
+  // stream rate (10-20 Hz), so the entity flapped off and on again while
+  // somebody was still walking. Hold the published state for motion_timeout_ms_
+  // past the last real movement instead, which is what check_motion_timeout_()
+  // enforces from loop() and what the option documents.
+  //
+  // last_motion_ms_ is deliberately NOT refreshed from a held state, or the
+  // hold would renew itself on every empty frame and motion could never end.
+  // An explicit absence still wins immediately: presence_on == false skips the
+  // hold entirely.
+  bool motion_state = moving;
+  if (!motion_state && presence_on && last_motion_ms_ != 0 &&
+      now - last_motion_ms_ <= motion_timeout_ms_)
+    motion_state = true;
+
   if (global_motion_sensor_ != nullptr &&
-      (!global_motion_sensor_->has_state() || global_motion_sensor_->state != moving))
-    global_motion_sensor_->publish_state(moving);
+      (!global_motion_sensor_->has_state() || global_motion_sensor_->state != motion_state))
+    global_motion_sensor_->publish_state(motion_state);
 
   // Base64 encode the binary data
   std::string base64_str = esphome::base64_encode(binary_data);

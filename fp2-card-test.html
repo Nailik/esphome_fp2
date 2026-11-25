@@ -1737,17 +1737,25 @@
                     const mountingPosition =
                         FIXTURE_MAP_CONFIG.mounting_position;
 
-                    // Hand-computed for left_upper_corner:
-                    // gridX=(-rawX+400)/800*14, gridY=rawY/800*14.
+                    // Hand-computed for left_upper_corner, matching the
+                    // 50-raw-units-per-cell transform in card.js (1 cm per
+                    // raw unit): gridX=(300-rawX)/50, gridY=rawY/50. rawX
+                    // runs +300 (left edge) to -400 (right edge, where the
+                    // radar clamps); rawY runs 0..700 over the 7 m depth.
                     const table = [
+                        // rawX=+300,rawY=0 -> the sensor's own corner (0,0).
+                        { rawX: 300, rawY: 0, expectedGridX: 0, expectedGridY: 0 },
                         // Center of the 7m x 7m area -> mid-grid.
-                        { rawX: 0, rawY: 400, expectedGridX: 7, expectedGridY: 7 },
-                        // rawX=+400,rawY=0 -> sensor's top-left corner (0,0).
-                        { rawX: 400, rawY: 0, expectedGridX: 0, expectedGridY: 0 },
-                        // rawX=-400,rawY=800 -> opposite (bottom-right) corner.
+                        {
+                            rawX: -50,
+                            rawY: 350,
+                            expectedGridX: 7,
+                            expectedGridY: 7,
+                        },
+                        // rawX=-400,rawY=700 -> opposite (bottom-right) corner.
                         {
                             rawX: -400,
-                            rawY: 800,
+                            rawY: 700,
                             expectedGridX: 14,
                             expectedGridY: 14,
                         },

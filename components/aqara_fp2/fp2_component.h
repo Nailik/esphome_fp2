@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/button/button.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/switch/switch.h"
@@ -308,6 +309,17 @@ struct FP2GlobalZoneOverride {
 
 static const uint32_t FP2_OVERRIDE_VERSION = 1;
 
+// A map the radar learned itself (after a learning button) persisted to its
+// own versioned NVS blob, one per map kind - same packed-struct idiom as
+// FP2ZoneOverride above, and deliberately a DISTINCT version constant so a
+// change here can never invalidate the zone overrides.
+struct FP2MapOverride {
+  uint32_t version;
+  GridMap grid;
+} __attribute__((packed));
+
+static const uint32_t FP2_MAP_OVERRIDE_VERSION = 1;
+
 // RENAME-01 (13.1.1-01): a runtime zone's custom display name, persisted to
 // a DISTINCT, separately-versioned NVS blob (key "fp2_zone_name_<id>") -
 // deliberately NOT a new field on FP2ZoneOverride. Adding a field to
@@ -350,6 +362,21 @@ static const GridMap FULL_ACTIVE_GRID = {
   0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF,
   0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFF,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+// One-shot learning triggers (the "AI learning" buttons in the Aqara app).
+// Pressing writes a 1 to the radar's auto-learn attribute once; the radar runs
+// the learning itself and reports the resulting map back. Deliberately a
+// button, not a switch: the attribute is a trigger, and re-sending it on every
+// (re)initialisation makes the radar go silent (observed on FW 100).
+class FP2LearnButton : public button::Button {
+public:
+  void set_parent(FP2Component *parent, AttrId attr) { parent_ = parent; attr_ = attr; }
+
+protected:
+  void press_action() override;
+  FP2Component *parent_{nullptr};
+  AttrId attr_{AttrId::INVALID};
 };
 
 // The runtime-tunable numbers: the two motion parameters (see target_moving_())
@@ -611,6 +638,8 @@ public:
   void reset_radar();
   void set_edge_auto_enabled(bool enabled);
   void set_interference_auto_enabled(bool enabled);
+  // Start one learning run on the radar (see FP2LearnButton).
+  void trigger_learning(AttrId attr);
 
   // Grid format conversion
   std::string grid_to_hex_card_format(const GridMap &grid);
@@ -785,9 +814,24 @@ protected:
   // re-applied to a different physical zone than the one it was saved for.
   // Not handled this phase (T-09-10, accepted) - solo single-device project
   // where zone-list reordering across reflashes is rare and user-controlled.
+  void fail_pending_save_batch_(const std::string &reason);
   bool load_zone_override_(uint8_t zone_id, FP2ZoneOverride *out);
   void save_zone_override_(uint8_t zone_id, const GridMap &grid, uint8_t sensitivity,
                             int zone_type);
+  // Learned maps (0x0110 interference, 0x0107 edge). kind: 0 = interference,
+  // 1 = edge. apply_map_overrides_() runs before the boot writes so a learned
+  // map is written back instead of being wiped by the all-zero write.
+  enum MapKind : uint8_t { MAP_INTERFERENCE = 0, MAP_EDGE = 1 };
+  // Indexed by MapKind: true between a learning button press and the radar's
+  // answering map report. Gates persistence, so an unsolicited report cannot
+  // overwrite the configured map - see handle_learned_map_report_(). Cleared
+  // by perform_reset_(), since a run cannot survive a radar reset.
+  bool learn_pending_[2]{false, false};
+  bool load_map_override_(uint8_t kind, FP2MapOverride *out);
+  void save_map_override_(uint8_t kind, const GridMap &grid);
+  void apply_map_overrides_();
+  void handle_learned_map_report_(AttrId attr_id, const std::vector<uint8_t> &payload);
+  void publish_map_grid_sensor_(uint8_t kind);
   bool load_global_zone_override_(FP2GlobalZoneOverride *out);
   void save_global_zone_override_(uint8_t presence_sensitivity);
 
@@ -814,9 +858,25 @@ protected:
   bool init_done_{false};
   uint32_t last_radar_frame_millis_{0};
   uint32_t last_heartbeat_millis_{0};
+  uint32_t last_reset_millis_{0};
   // Radar watchdog: re-run the init sequence if the heartbeat stops, or if
   // the radar sends an unprompted work_mode report (it does so on boot).
   static const uint32_t HEARTBEAT_TIMEOUT_MS = 15000;
+  // A soft reboot (OTA) leaves the radar powered and it then sometimes never
+  // sends anything at all; nothing else in the init path retries, so re-pulse
+  // the reset pin once this long has passed with no radar traffic.
+  static const uint32_t NO_TRAFFIC_RETRY_MS = 10000;
+  // The retry is bounded: the delay doubles each attempt (10s, 20s, 40s, 80s,
+  // 160s) and then stops, so a radar that is never going to answer does not
+  // pulse reset and block the main loop for ever. Cleared whenever traffic is
+  // actually seen (check_initialization_()), and by a hand-requested reset
+  // (reset_radar()).
+  static const uint8_t MAX_NO_TRAFFIC_RETRIES = 5;
+  uint8_t no_traffic_retries_{0};
+  bool no_traffic_gave_up_{false};
+  // Set by perform_reset_(): millis() can legitimately be 0, so the retry
+  // cannot use last_reset_millis_ > 0 as its "a reset has happened" test.
+  bool reset_armed_{false};
   static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
   uint32_t last_work_mode_write_millis_{0};
 
@@ -916,9 +976,15 @@ protected:
   uint32_t motion_timeout_ms_{5000};
   float motion_distance_cm_{20.0f};
   uint32_t last_motion_ms_{0};
+  // True once the radar has reported global presence (0x0105) since the last
+  // init. Until then global_presence_sensor_ holds only our own post-reset
+  // assumption, which must not gate motion off - see
+  // handle_location_tracking_report_().
+  bool presence_reported_{false};
   bool target_moving_(uint8_t id, int16_t x, int16_t y, uint32_t now);
   void prune_motion_tracks_(uint32_t now);
   void force_motion_off_();
+  void publish_motion_off_();
   void check_motion_timeout_();
   sensor::Sensor *realtime_people_number_sensor_{nullptr};
   sensor::Sensor *ontime_people_number_sensor_{nullptr};
