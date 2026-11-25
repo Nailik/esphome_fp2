@@ -89,14 +89,22 @@ The ESPHome component exposes several SubIDs found in the stock firmware dump. D
 | `fall_detection_sensitivity` | `0x0123` | `low` | `low`, `medium`, or `high`. Written on every init, like stock. |
 | `interference_learning_button` | `0x0139` | unset | Optional button: starts one interference-learning run on the radar (the Aqara app's "AI learning"). A trigger, not a state - never written at init. |
 | `edge_learning_button` | `0x0150` | unset | Optional button: starts one room-edge learning run. Same trigger semantics. |
+| `forget_interference_map_button` | `0x0110` | unset | Optional button: discards a learned interference map and restores `interference_grid`. |
+| `forget_edge_map_button` | `0x0107` | unset | Optional button: discards a learned edge map and restores `edge_grid`. |
 | `target_timeout` | - | `8s` | How long a non-empty target list may go unrefreshed before it is retracted and an explicit empty list is published. The radar does not reliably close out a track with a final `count=0` frame, so without this a card keeps drawing somebody at the door. `0s` disables the watchdog. |
 
 A map the radar learns itself (0x0110 interference, 0x0107 edge) is reported
 back when the run finishes. That learned map becomes the live map: it is saved
 to its own NVS blob, shown on the card, and written back to the radar on the
-next boot in place of the compiled `interference_grid` / `edge_grid`. Removing
-the saved map means erasing NVS (or reflashing with `esphome clean`); editing
-`interference_grid` in YAML no longer wins once the radar has learned one.
+next boot in place of the compiled `interference_grid` / `edge_grid`, so
+editing `interference_grid` in YAML no longer wins once the radar has learned
+one. The forget buttons undo that: they drop the saved map, put the configured
+grid back on the radar, and let YAML win again. Without one of those buttons in
+the config the only way back is erasing NVS (or reflashing with
+`esphome clean`).
+
+A learning run that the radar never answers is abandoned after three minutes,
+so a failed run does not leave its button permanently rejecting presses.
 
 `nearest_distance` assumes 1 cm per raw target unit, which is measured correct on radar
 firmware 100. Firmware 99 is reported to use ~2.5 cm per unit
