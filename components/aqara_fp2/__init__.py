@@ -350,7 +350,10 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_RADAR_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement=UNIT_CELSIUS,
                 icon=ICON_THERMOMETER,
-                accuracy_decimals=0,
+                # 1, not 0: temperature_offset has a 0.5 step, and at 0
+                # decimals Home Assistant rounds -15.5 and -15.0 to the same
+                # whole degree, so half the offset range was unobservable.
+                accuracy_decimals=1,
                 device_class=DEVICE_CLASS_TEMPERATURE,
                 state_class=STATE_CLASS_MEASUREMENT,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,

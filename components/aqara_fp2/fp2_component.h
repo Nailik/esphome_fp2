@@ -509,7 +509,16 @@ public:
       mounting_position_sensor_->publish_state(pos_str);
     }
   }
-  void set_temperature_offset(float celsius) { temperature_offset_ = celsius; }
+  // Re-publishes the last reading with the new offset. AttrId::TEMPERATURE is
+  // read once per init and never reported unsolicited, so an offset change
+  // would otherwise not show on radar_temperature until the next reboot or
+  // re-initialisation.
+  void set_temperature_offset(float celsius) {
+    temperature_offset_ = celsius;
+    if (has_raw_temperature_ && radar_temperature_sensor_ != nullptr) {
+      radar_temperature_sensor_->publish_state(last_raw_temperature_ + temperature_offset_);
+    }
+  }
   void set_radar_temperature_sensor(sensor::Sensor *sensor) {
       radar_temperature_sensor_ = sensor;
   }
@@ -884,6 +893,11 @@ protected:
   sensor::Sensor *radar_temperature_sensor_{nullptr};
   // Added to the radar's reported temperature before publishing.
   float temperature_offset_{0.0f};
+  // Last raw value the radar reported, before the offset, so a change to the
+  // offset can be applied to the reading already on show. TEMPERATURE is read
+  // once per init and never reported unsolicited.
+  uint16_t last_raw_temperature_{0};
+  bool has_raw_temperature_{false};
 
   // Global motion from target positions. A target counts as moving once it has
   // travelled motion_distance_cm_ from its reference point (raw target units
