@@ -1290,6 +1290,95 @@ void FP2Component::save_zone_from_editor(uint8_t zone_id, uint8_t sensitivity, i
   this->save_zone_to_sensor(zone_id, hex, sensitivity, zone_type);
 }
 
+void FP2MotionNumber::setup() {
+  this->pref_ = global_preferences->make_preference<float>(this->get_object_id_hash());
+  float value = this->initial_;
+  float saved;
+  if (this->pref_.load(&saved) && std::isfinite(saved) && saved > 0)
+    value = saved;
+  this->apply_(value);
+}
+
+void FP2MotionNumber::control(float value) {
+  this->apply_(value);
+  this->pref_.save(&value);
+}
+
+void FP2MotionNumber::apply_(float value) {
+  if (this->parent_ != nullptr) {
+    if (this->kind_ == DISTANCE)
+      this->parent_->set_motion_distance_cm(value);
+    else
+      this->parent_->set_motion_timeout_s(value);
+  }
+  this->publish_state(value);
+}
+
+// Is this target moving? Measured against the point it was last seen to move
+// to, so a target that drifts by a few centimetres never trips, and a target
+// that walked stays "moving" until motion_timeout_ms_ after its last step.
+bool FP2Component::target_moving_(uint8_t id, int16_t x, int16_t y, uint32_t now) {
+  MotionTrack *track = nullptr;
+  MotionTrack *free_slot = nullptr;
+  for (auto &m : motion_tracks_) {
+    if (m.used && m.id == id) {
+      track = &m;
+      break;
+    }
+    if (!m.used && free_slot == nullptr)
+      free_slot = &m;
+  }
+  if (track == nullptr) {
+    if (free_slot == nullptr) {
+      // Every slot taken: recycle the one not seen for longest.
+      free_slot = &motion_tracks_[0];
+      for (auto &m : motion_tracks_)
+        if (m.seen_ms < free_slot->seen_ms)
+          free_slot = &m;
+    }
+    track = free_slot;
+    track->used = true;
+    track->id = id;
+    track->ref_x = x;
+    track->ref_y = y;
+    track->last_move_ms = 0;
+  }
+  track->seen_ms = now;
+  float dx = (float) x - track->ref_x, dy = (float) y - track->ref_y;
+  if (std::sqrt(dx * dx + dy * dy) >= motion_distance_cm_) {
+    track->ref_x = x;
+    track->ref_y = y;
+    track->last_move_ms = now;
+  }
+  return track->last_move_ms != 0 && now - track->last_move_ms <= motion_timeout_ms_;
+}
+
+void FP2Component::prune_motion_tracks_(uint32_t now) {
+  for (auto &m : motion_tracks_)
+    if (m.used && now - m.seen_ms > 3000)
+      m.used = false;
+}
+
+void FP2Component::force_motion_off_() {
+  for (auto &m : motion_tracks_)
+    m.used = false;
+  if (global_motion_sensor_ != nullptr &&
+      (!global_motion_sensor_->has_state() || global_motion_sensor_->state))
+    global_motion_sensor_->publish_state(false);
+}
+
+// The target stream can stop (a lost target, a learning run) with motion left
+// on, so the timeout is enforced from loop() as well as from each frame.
+void FP2Component::check_motion_timeout_() {
+  if (last_motion_ms_ == 0)
+    return;
+  uint32_t now = millis();
+  if (now - last_motion_ms_ > motion_timeout_ms_) {
+    last_motion_ms_ = 0;
+    force_motion_off_();
+  }
+}
+
 void FP2LocationSwitch::write_state(bool state) {
   if (this->parent_ != nullptr) {
     this->parent_->set_location_reporting_enabled(state);
@@ -1388,6 +1477,7 @@ void FP2Component::loop() {
   check_heartbeat_watchdog_();
   check_target_stale_();
   process_command_queue_();
+  check_motion_timeout_();
 
   // Release zone motion sensors once their debounce timeout expires.
   // CR-01 fix (12-REVIEW iter2): skip inactive (runtime-removed) zones -
@@ -1703,7 +1793,8 @@ void FP2Component::check_initialization_() {
     }
 
     if (global_presence_sensor_ != nullptr) global_presence_sensor_->publish_state(false);
-    if (global_motion_sensor_ != nullptr) global_motion_sensor_->publish_state(false);
+    last_motion_ms_ = 0;
+    force_motion_off_();
 
     // Clear target tracking state - no targets after reset
     if (target_tracking_sensor_ != nullptr) {
@@ -2152,9 +2243,10 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
             if (presence_event_sensor_ != nullptr) {
               presence_event_sensor_->publish_state(presence_event_name(event));
             }
-            if (global_motion_sensor_ != nullptr) {
-              global_motion_sensor_->publish_state((event & 0x01) == 0);
-            }
+            // Motion comes from the target positions (target_moving_()), not
+            // from this event's arrival/departure parity: the parity says
+            // "someone entered", which is not the same as "someone is moving"
+            // and never clears on its own.
             break;
         }
         break;
@@ -2164,6 +2256,10 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
             uint8_t state = payload[3];
             if (global_presence_sensor_ != nullptr) {
               global_presence_sensor_->publish_state(state != 0);
+            }
+            if (state == 0) {
+              last_motion_ms_ = 0;
+              force_motion_off_();
             }
             ESP_LOGI(TAG, "Received global presence report: %u", state);
             break;
@@ -2348,6 +2444,7 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
   static constexpr float METERS_PER_UNIT = 7.0f / 800.0f;
   float nearest = NAN;
   uint8_t valid = 0;
+  bool moving = false;
 
   for (int i = 0; i < count; i++) {
     const size_t offset = 1 + static_cast<size_t>(i) * LOCATION_TARGET_BYTES;
@@ -2358,8 +2455,23 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
     float dist_m = sqrtf((float) x * x + (float) y * y) * METERS_PER_UNIT;
     if (std::isnan(nearest) || dist_m < nearest)
       nearest = dist_m;
+    if (target_moving_(binary_data[offset], x, y, now))
+      moving = true;
     valid++;
   }
+  prune_motion_tracks_(now);
+
+  // Motion never shows while presence is off: the radar keeps streaming a
+  // dropped track for a while after the person has gone.
+  bool presence_on = global_presence_sensor_ == nullptr ||
+                     (global_presence_sensor_->has_state() && global_presence_sensor_->state);
+  if (!presence_on)
+    moving = false;
+  if (moving)
+    last_motion_ms_ = now;
+  if (global_motion_sensor_ != nullptr &&
+      (!global_motion_sensor_->has_state() || global_motion_sensor_->state != moving))
+    global_motion_sensor_->publish_state(moving);
 
   // Base64 encode the binary data
   std::string base64_str = esphome::base64_encode(binary_data);
