@@ -967,6 +967,7 @@ protected:
   bool target_moving_(uint8_t id, int16_t x, int16_t y, uint32_t now);
   void prune_motion_tracks_(uint32_t now);
   void force_motion_off_();
+  void publish_motion_off_();
   void check_motion_timeout_();
   sensor::Sensor *realtime_people_number_sensor_{nullptr};
   sensor::Sensor *ontime_people_number_sensor_{nullptr};
