@@ -804,6 +804,7 @@ protected:
   // re-applied to a different physical zone than the one it was saved for.
   // Not handled this phase (T-09-10, accepted) - solo single-device project
   // where zone-list reordering across reflashes is rare and user-controlled.
+  void fail_pending_save_batch_(const std::string &reason);
   bool load_zone_override_(uint8_t zone_id, FP2ZoneOverride *out);
   void save_zone_override_(uint8_t zone_id, const GridMap &grid, uint8_t sensitivity,
                             int zone_type);
@@ -847,9 +848,25 @@ protected:
   bool init_done_{false};
   uint32_t last_radar_frame_millis_{0};
   uint32_t last_heartbeat_millis_{0};
+  uint32_t last_reset_millis_{0};
   // Radar watchdog: re-run the init sequence if the heartbeat stops, or if
   // the radar sends an unprompted work_mode report (it does so on boot).
   static const uint32_t HEARTBEAT_TIMEOUT_MS = 15000;
+  // A soft reboot (OTA) leaves the radar powered and it then sometimes never
+  // sends anything at all; nothing else in the init path retries, so re-pulse
+  // the reset pin once this long has passed with no radar traffic.
+  static const uint32_t NO_TRAFFIC_RETRY_MS = 10000;
+  // The retry is bounded: the delay doubles each attempt (10s, 20s, 40s, 80s,
+  // 160s) and then stops, so a radar that is never going to answer does not
+  // pulse reset and block the main loop for ever. Cleared whenever traffic is
+  // actually seen (check_initialization_()), and by a hand-requested reset
+  // (reset_radar()).
+  static const uint8_t MAX_NO_TRAFFIC_RETRIES = 5;
+  uint8_t no_traffic_retries_{0};
+  bool no_traffic_gave_up_{false};
+  // Set by perform_reset_(): millis() can legitimately be 0, so the retry
+  // cannot use last_reset_millis_ > 0 as its "a reset has happened" test.
+  bool reset_armed_{false};
   static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
   uint32_t last_work_mode_write_millis_{0};
 
