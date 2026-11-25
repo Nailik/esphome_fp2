@@ -2765,7 +2765,13 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
     // Target layout: id(1), X s16(2), Y s16(2), ... (big endian)
     int16_t x = (int16_t)((binary_data[offset + 1] << 8) | binary_data[offset + 2]);
     int16_t y = (int16_t)((binary_data[offset + 3] << 8) | binary_data[offset + 4]);
-    float dist_m = sqrtf((float) x * x + (float) y * y) * METERS_PER_UNIT;
+    // Measure from where the sensor actually is. In corner mode the unit sits
+    // at raw (300, 0) - that is grid (0, 0) under the (300 - rawX) / 50
+    // mapping - so the raw origin is 3 m away from it along X. Measuring from
+    // (0, 0) there reported ~2.55 m for somebody standing 1 m diagonally in
+    // front of the unit. Wall mode does have the sensor at the raw origin.
+    const float dx = (float) x - corner_mounted_sensor_raw_x_();
+    float dist_m = sqrtf(dx * dx + (float) y * y) * METERS_PER_UNIT;
     if (std::isnan(nearest) || dist_m < nearest)
       nearest = dist_m;
     if (target_moving_(binary_data[offset], x, y, now))
