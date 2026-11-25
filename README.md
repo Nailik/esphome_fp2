@@ -70,6 +70,27 @@ The FP2 uses a 14×14 grid to map the detection area:
 - `X` = Zone coverage
 - Grids available: `interference_grid`, `exit_grid`, `edge_label_grid`
 
+#### Overlap checks
+
+Each grid is fourteen lines of dots on its own, so a cell claimed by two of
+them is easy to draw and impossible to spot. `esphome config` now reports the
+combinations that are almost always mistakes:
+
+- a zone covering a cell `exit_grid` also claims — the radar retires targets
+  that leave through an exit cell, so zone presence can drop early, or trigger
+  as somebody only passes the door
+- a zone covering a cell `edge_grid` marks as outside the room, or that
+  `interference_grid` marks as an interference source — those cells can never
+  report presence
+- two zones sharing a cell — a target there sets both zones' presence
+- `exit_grid` marking a cell that `edge_grid` also marks as outside the room —
+  the radar does not track targets there, so the exit cell cannot do anything
+
+Each warning names the exact cells as `(row, col)`, indexed the way the YAML
+grid is written. They are warnings, not errors: the radar takes every mask as
+written, and what it does with a doubly-claimed cell is its own business, so
+the check reports rather than decides.
+
 ### Firmware-Derived Radar Options
 
 The ESPHome component exposes several SubIDs found in the stock firmware dump. Defaults preserve the current component behavior for the already-used report streams.

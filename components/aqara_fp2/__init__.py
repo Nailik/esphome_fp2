@@ -1,4 +1,5 @@
 import json
+import logging
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
@@ -152,6 +153,8 @@ CONF_DEBUG_MODE = "debug_mode"
 # DISABLED (D-05) - no port opened unless telnet_enable is explicitly set.
 # No authentication (D-06) - LAN-only/trusted-network use, documented loudly
 # in example_config.yaml and via a config-time ESP_LOGW.
+_LOGGER = logging.getLogger(__name__)
+
 CONF_TELNET_ENABLE = "telnet_enable"
 CONF_TELNET_PORT = "telnet_port"
 
@@ -254,6 +257,97 @@ def parse_ascii_grid(value):
 def grid_to_hex_string(grid_data):
     """Convert a 40-byte grid to a compact hex string for storage."""
     return "".join(f"{b:02x}" for b in grid_data)
+
+
+def grid_cells(grid_data):
+    """Decode parse_ascii_grid()'s 40-byte blob back to the {(row, col)} it came from.
+
+    Inverse of the packing above: row r is the big-endian 16-bit word at
+    bytes 2r/2r+1, and input column c sits at bit 15 - (c + offset_col).
+    """
+    cells = set()
+    for r in range(14):
+        row_val = (grid_data[r * 2] << 8) | grid_data[r * 2 + 1]
+        for c in range(14):
+            if row_val & (1 << (15 - (c + 2))):
+                cells.add((r, c))
+    return cells
+
+
+def describe_cells(cells):
+    """Render a cell set the way the YAML grids are indexed, newest-first eight."""
+    shown = sorted(cells)[:8]
+    text = ", ".join(f"(row {r}, col {c})" for r, c in shown)
+    if len(cells) > len(shown):
+        text += f", ... ({len(cells)} cells in total)"
+    return text
+
+
+def validate_grid_overlaps(config):
+    """Warn about grids that contradict each other.
+
+    The radar takes every mask as written - nothing here rejects a config -
+    but a cell claimed by two masks is almost always a drawing mistake, and
+    it is invisible in YAML because each grid is 14 lines of dots on its own.
+    Warnings rather than errors: the exact behaviour of a doubly-claimed cell
+    is the radar's own, so this reports rather than decides.
+    """
+    interference = config.get(CONF_INTERFERENCE_GRID)
+    exit_grid = config.get(CONF_EXIT_GRID)
+    edge = config.get(CONF_EDGE_GRID)
+
+    exit_cells = grid_cells(exit_grid) if exit_grid is not None else set()
+    edge_cells = grid_cells(edge) if edge is not None else set()
+    interference_cells = grid_cells(interference) if interference is not None else set()
+
+    zones = []
+    for zone_conf in config.get(CONF_ZONES, []):
+        zones.append((str(zone_conf[CONF_ID]), grid_cells(zone_conf[CONF_GRID])))
+
+    for name, cells in zones:
+        hit = cells & exit_cells
+        if hit:
+            _LOGGER.warning(
+                "aqara_fp2: zone '%s' covers %d cell(s) that exit_grid also claims: %s. "
+                "The radar retires targets that leave through an exit cell, so presence "
+                "in this zone can drop early - or trigger as somebody only passes the door.",
+                name, len(hit), describe_cells(hit),
+            )
+        hit = cells & edge_cells
+        if hit:
+            _LOGGER.warning(
+                "aqara_fp2: zone '%s' covers %d cell(s) that edge_grid marks as outside "
+                "the room: %s. Those cells can never report presence.",
+                name, len(hit), describe_cells(hit),
+            )
+        hit = cells & interference_cells
+        if hit:
+            _LOGGER.warning(
+                "aqara_fp2: zone '%s' covers %d cell(s) that interference_grid marks as "
+                "an interference source: %s.",
+                name, len(hit), describe_cells(hit),
+            )
+
+    for i in range(len(zones)):
+        for j in range(i + 1, len(zones)):
+            hit = zones[i][1] & zones[j][1]
+            if hit:
+                _LOGGER.warning(
+                    "aqara_fp2: zones '%s' and '%s' overlap on %d cell(s): %s. "
+                    "A target there sets both zones' presence.",
+                    zones[i][0], zones[j][0], len(hit), describe_cells(hit),
+                )
+
+    hit = exit_cells & edge_cells
+    if hit:
+        _LOGGER.warning(
+            "aqara_fp2: exit_grid marks %d cell(s) that edge_grid also marks as outside "
+            "the room: %s. The radar does not track targets there, so those exit cells "
+            "cannot do anything.",
+            len(hit), describe_cells(hit),
+        )
+
+    return config
 
 ZONE_BASE_SCHEMA = cv.Schema(
     {
@@ -461,6 +555,8 @@ CONFIG_SCHEMA = (
     .extend(uart.UART_DEVICE_SCHEMA)
     .extend(cv.COMPONENT_SCHEMA)
 )
+
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, validate_grid_overlaps)
 
 SENSOR_MAP = {
     CONF_RADAR_TEMPERATURE: (sensor.new_sensor, "set_radar_temperature_sensor"),
