@@ -43,9 +43,18 @@ aqara_fp2_ns = cg.esphome_ns.namespace("aqara_fp2")
 FP2Component = aqara_fp2_ns.class_("FP2Component", cg.Component, uart.UARTDevice)
 FP2LocationSwitch = aqara_fp2_ns.class_("FP2LocationSwitch", switch.Switch)
 FP2OperatingModeSelect = aqara_fp2_ns.class_("FP2OperatingModeSelect", select.Select)
-FP2TemperatureOffsetNumber = aqara_fp2_ns.class_(
-    "FP2TemperatureOffsetNumber", number.Number, cg.Component
-)
+FP2TunableNumber = aqara_fp2_ns.class_("FP2TunableNumber", number.Number, cg.Component)
+# key -> (Kind, default, min, max, step, unit, icon); Kind must match
+# FP2TunableNumber::Kind in fp2_component.h
+TUNABLE_NUMBERS = {
+    "motion_timeout": (0, 5.0, 1.0, 600.0, 1.0, "s", "mdi:timer-outline"),
+    "motion_distance": (1, 20.0, 5.0, 200.0, 5.0, "cm", "mdi:ruler"),
+    # Added to the radar's reported temperature. The radar reports its die
+    # temperature, which runs well above the room; the correction depends on
+    # the enclosure, so it is tunable at runtime and kept in flash.
+    "temperature_offset": (2, 0.0, -50.0, 50.0, 0.5, UNIT_CELSIUS, "mdi:thermometer-minus"),
+}
+
 FP2Zone = aqara_fp2_ns.class_("FP2Zone", cg.Component)
 
 # PROTO-04 (D-04): must match fp2_component.h's OPERATING_MODE_* constants
@@ -57,6 +66,7 @@ CONF_FP2_ID = "fp2_id"
 
 CONF_MOUNTING_POSITION = "mounting_position"
 CONF_LEFT_RIGHT_REVERSE = "left_right_reverse"
+CONF_TARGET_TIMEOUT = "target_timeout"
 # 0x0106 approach/away distance ("Proximity" in the Aqara app)
 CONF_PROXIMITY = "proximity"
 CONF_INTERFERENCE_GRID = "interference_grid"
@@ -91,7 +101,6 @@ CONF_TARGET_TRACKING = "target_tracking"
 CONF_LOCATION_REPORT_SWITCH = "location_report_switch"
 CONF_OPERATING_MODE = "operating_mode"
 CONF_RADAR_TEMPERATURE = "radar_temperature"
-CONF_TEMPERATURE_OFFSET = "temperature_offset"
 CONF_INITIAL_VALUE = "initial_value"
 CONF_REALTIME_PEOPLE_NUMBER = "realtime_people_number"
 CONF_ONTIME_PEOPLE_NUMBER = "ontime_people_number"
@@ -268,6 +277,9 @@ CONFIG_SCHEMA = (
             ),
 
             cv.Optional(CONF_LEFT_RIGHT_REVERSE, default=False): cv.boolean,
+            # Longest silence in the 0x0117 target stream before the last
+            # published target list is retracted as stale. "0s" disables it.
+            cv.Optional(CONF_TARGET_TIMEOUT, default="8s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_PROXIMITY, default="medium"): cv.enum(PROXIMITY_LEVELS),
             cv.Optional(CONF_FALL_DETECTION): cv.boolean,
             cv.Optional(CONF_FALL_DETECTION_SENSITIVITY): cv.enum(SENSITIVITY_LEVELS),
@@ -291,23 +303,21 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_OPERATING_MODE): select.select_schema(
                 FP2OperatingModeSelect
             ),
-            # Added to the radar's reported temperature. The radar reports its
-            # die temperature, which runs well above the room; the correction
-            # depends on the enclosure, so it is tunable at runtime and the
-            # value is kept in flash. initial_value only applies on a device
-            # that has never had one saved.
-            cv.Optional(CONF_TEMPERATURE_OFFSET): number.number_schema(
-                FP2TemperatureOffsetNumber,
-                unit_of_measurement=UNIT_CELSIUS,
-                icon="mdi:thermometer-minus",
-                entity_category=ENTITY_CATEGORY_CONFIG,
-            ).extend(
-                {
-                    cv.Optional(CONF_INITIAL_VALUE, default=0.0): cv.float_range(
-                        min=-50.0, max=50.0
-                    )
-                }
-            ),
+            **{
+                cv.Optional(key): number.number_schema(
+                    FP2TunableNumber,
+                    unit_of_measurement=unit,
+                    icon=icon,
+                    entity_category=ENTITY_CATEGORY_CONFIG,
+                ).extend(
+                    {
+                        cv.Optional(CONF_INITIAL_VALUE, default=default): cv.float_range(
+                            min=lo, max=hi
+                        )
+                    }
+                )
+                for key, (_, default, lo, hi, _, unit, icon) in TUNABLE_NUMBERS.items()
+            },
 
             cv.Optional("edge_label_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
             cv.Optional("entry_exit_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
@@ -491,6 +501,7 @@ async def to_code(config):
 
     cg.add(var.set_mounting_position(config[CONF_MOUNTING_POSITION]))
     cg.add(var.set_left_right_reverse(config[CONF_LEFT_RIGHT_REVERSE]))
+    cg.add(var.set_target_timeout(config[CONF_TARGET_TIMEOUT]))
     cg.add(var.set_proximity(config[CONF_PROXIMITY]))
     cg.add(var.set_debug_probe_reads(config[CONF_DEBUG_PROBE_READS]))
     cg.add(var.set_debug_mode(config[CONF_DEBUG_MODE]))
@@ -551,13 +562,13 @@ async def to_code(config):
         )
         cg.add(var.set_operating_mode_select(sel))
 
-    if CONF_TEMPERATURE_OFFSET in config:
-        offset_conf = config[CONF_TEMPERATURE_OFFSET]
-        num = await number.new_number(
-            offset_conf, min_value=-50.0, max_value=50.0, step=0.5
-        )
-        await cg.register_component(num, offset_conf)
-        cg.add(num.set_parent(var, offset_conf[CONF_INITIAL_VALUE]))
+    for key, (kind, _, lo, hi, step, _, _) in TUNABLE_NUMBERS.items():
+        if key in config:
+            num = await number.new_number(
+                config[key], min_value=lo, max_value=hi, step=step
+            )
+            await cg.register_component(num, config[key])
+            cg.add(num.set_parent(var, kind, config[key][CONF_INITIAL_VALUE]))
 
     # Generate map config JSON data at compile time
     map_config_data = {

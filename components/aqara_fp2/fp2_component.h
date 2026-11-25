@@ -352,20 +352,24 @@ static const GridMap FULL_ACTIVE_GRID = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-// Runtime-tunable offset added to the radar temperature before it is
-// published. The radar reports its own die temperature, which runs well above
-// the room, and the right correction depends on the enclosure - so it is a
-// number in Home Assistant, persisted to flash (its own NVS key, derived from
-// the entity's object id) so the value survives a reboot.
-class FP2TemperatureOffsetNumber : public number::Number, public Component {
+// The runtime-tunable numbers: the two motion parameters (see target_moving_())
+// and the radar temperature offset. Each is persisted to flash under its own
+// entity-derived NVS key, so a value set in Home Assistant survives a reboot.
+class FP2TunableNumber : public number::Number, public Component {
 public:
-  void set_parent(FP2Component *parent, float initial) { parent_ = parent; initial_ = initial; }
+  enum Kind : uint8_t { TIMEOUT = 0, DISTANCE = 1, TEMPERATURE_OFFSET = 2 };
+  void set_parent(FP2Component *parent, uint8_t kind, float initial) {
+    parent_ = parent;
+    kind_ = kind;
+    initial_ = initial;
+  }
   void setup() override;
 
 protected:
   void control(float value) override;
   void apply_(float value);
   FP2Component *parent_{nullptr};
+  uint8_t kind_{TIMEOUT};
   float initial_{0.0f};
   ESPPreferenceObject pref_;
 };
@@ -404,9 +408,15 @@ public:
 
   // Configuration setters
   void set_radar_reset_pin(GPIOPin *pin) { reset_pin_ = pin; }
+  void set_motion_timeout_s(float s) { motion_timeout_ms_ = (uint32_t) (s * 1000.0f); }
+  void set_motion_distance_cm(float cm) { motion_distance_cm_ = cm; }
   void set_mounting_position(uint8_t pos) { mounting_position_ = pos; }
   void set_left_right_reverse(bool val) { left_right_reverse_ = val; }
   void set_proximity(uint8_t val) { proximity_ = val; }
+  // Stale-target watchdog: 0 disables it, otherwise the longest gap in the
+  // 0x0117 stream we accept before declaring the last published target list
+  // dead. See check_target_stale_().
+  void set_target_timeout(uint32_t ms) { target_timeout_ms_ = ms; }
 
   void set_fall_detection(bool val) {
     fall_detection_enabled_ = val;
@@ -724,6 +734,8 @@ protected:
   void handle_ack_(AttrId attr_id);
   void handle_report_(AttrId attr_id, const std::vector<uint8_t> &payload);
   void handle_location_tracking_report_(const std::vector<uint8_t> &payload);
+  void check_target_stale_();
+  void publish_empty_targets_();
   void handle_temperature_report_(const std::vector<uint8_t> &payload);
   void handle_debug_log_report_(const std::vector<uint8_t> &payload);
   void handle_simple_uint32_report_(const std::vector<uint8_t> &payload,
@@ -854,6 +866,13 @@ protected:
   uint32_t last_location_debug_millis_{0};
   uint8_t last_location_target_count_{0xFF};
   uint8_t last_published_target_count_{0xFF};
+  // Stale-target watchdog state. The radar can stop streaming 0x0117 without
+  // ever sending a final count=0 frame, which leaves the last non-empty target
+  // list latched in HA forever (a person frozen on the map at the spot where
+  // they left the room). Timestamp the stream and retract it ourselves.
+  uint32_t last_location_report_millis_{0};
+  uint32_t target_timeout_ms_{8000};
+  bool targets_nonempty_{false};
   uint32_t last_nearest_distance_publish_millis_{0};
 
   // Grid text sensors
@@ -865,6 +884,28 @@ protected:
   sensor::Sensor *radar_temperature_sensor_{nullptr};
   // Added to the radar's reported temperature before publishing.
   float temperature_offset_{0.0f};
+
+  // Global motion from target positions. A target counts as moving once it has
+  // travelled motion_distance_cm_ from its reference point (raw target units
+  // are 1 cm), and keeps counting as moving for motion_timeout_ms_ after that
+  // step. One slot per concurrently tracked target; the radar never reports
+  // more than 8 at once, and the least-recently-seen slot is recycled if it
+  // ever does.
+  struct MotionTrack {
+    bool used{false};
+    uint8_t id{0};
+    int16_t ref_x{0}, ref_y{0};
+    uint32_t last_move_ms{0};
+    uint32_t seen_ms{0};
+  };
+  MotionTrack motion_tracks_[8];
+  uint32_t motion_timeout_ms_{5000};
+  float motion_distance_cm_{20.0f};
+  uint32_t last_motion_ms_{0};
+  bool target_moving_(uint8_t id, int16_t x, int16_t y, uint32_t now);
+  void prune_motion_tracks_(uint32_t now);
+  void force_motion_off_();
+  void check_motion_timeout_();
   sensor::Sensor *realtime_people_number_sensor_{nullptr};
   sensor::Sensor *ontime_people_number_sensor_{nullptr};
   sensor::Sensor *realtime_people_counting_sensor_{nullptr};

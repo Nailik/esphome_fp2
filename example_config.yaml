@@ -372,6 +372,11 @@ aqara_fp2:
       # people_count:
       #   name: "Sofa Zone People Count"
 
+  # Global motion is derived from how far targets move (see target_moving_).
+  # Both are tunable in Home Assistant and kept in flash.
+  motion_timeout:  { name: "Motion Timeout" }
+  motion_distance: { name: "Motion Distance" }
+
   # Added to the radar temperature (it reports its own die temperature, which
   # runs above the room). Tunable in Home Assistant, kept in flash.
   temperature_offset:
