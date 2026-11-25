@@ -775,6 +775,7 @@ protected:
   // re-applied to a different physical zone than the one it was saved for.
   // Not handled this phase (T-09-10, accepted) - solo single-device project
   // where zone-list reordering across reflashes is rare and user-controlled.
+  void fail_pending_save_batch_(const std::string &reason);
   bool load_zone_override_(uint8_t zone_id, FP2ZoneOverride *out);
   void save_zone_override_(uint8_t zone_id, const GridMap &grid, uint8_t sensitivity,
                             int zone_type);
@@ -823,7 +824,6 @@ protected:
   // Set by perform_reset_(): millis() can legitimately be 0, so the retry
   // cannot use last_reset_millis_ > 0 as its "a reset has happened" test.
   bool reset_armed_{false};
-  void fail_pending_save_batch_(const std::string &reason);
   static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
   uint32_t last_work_mode_write_millis_{0};
 
