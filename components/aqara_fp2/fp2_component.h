@@ -393,12 +393,12 @@ protected:
   uint8_t kind_{0};
 };
 
-// The two runtime-tunable motion parameters (see target_moving_()). Persisted
-// to flash under the entity's own NVS key so a value set in Home Assistant
-// survives a reboot.
-class FP2MotionNumber : public number::Number, public Component {
+// The runtime-tunable numbers: the two motion parameters (see target_moving_())
+// and the radar temperature offset. Each is persisted to flash under its own
+// entity-derived NVS key, so a value set in Home Assistant survives a reboot.
+class FP2TunableNumber : public number::Number, public Component {
 public:
-  enum Kind : uint8_t { TIMEOUT = 0, DISTANCE = 1 };
+  enum Kind : uint8_t { TIMEOUT = 0, DISTANCE = 1, TEMPERATURE_OFFSET = 2 };
   void set_parent(FP2Component *parent, uint8_t kind, float initial) {
     parent_ = parent;
     kind_ = kind;
@@ -554,6 +554,16 @@ public:
         default: pos_str = "wall"; break;
       }
       mounting_position_sensor_->publish_state(pos_str);
+    }
+  }
+  // Re-publishes the last reading with the new offset. AttrId::TEMPERATURE is
+  // read once per init and never reported unsolicited, so an offset change
+  // would otherwise not show on radar_temperature until the next reboot or
+  // re-initialisation.
+  void set_temperature_offset(float celsius) {
+    temperature_offset_ = celsius;
+    if (has_raw_temperature_ && radar_temperature_sensor_ != nullptr) {
+      radar_temperature_sensor_->publish_state(last_raw_temperature_ + temperature_offset_);
     }
   }
   void set_radar_temperature_sensor(sensor::Sensor *sensor) {
@@ -980,6 +990,13 @@ protected:
   text_sensor::TextSensor *mounting_position_sensor_{nullptr};
 
   sensor::Sensor *radar_temperature_sensor_{nullptr};
+  // Added to the radar's reported temperature before publishing.
+  float temperature_offset_{0.0f};
+  // Last raw value the radar reported, before the offset, so a change to the
+  // offset can be applied to the reading already on show. TEMPERATURE is read
+  // once per init and never reported unsolicited.
+  uint16_t last_raw_temperature_{0};
+  bool has_raw_temperature_{false};
 
   // Global motion from target positions. A target counts as moving once it has
   // travelled motion_distance_cm_ from its reference point (raw target units

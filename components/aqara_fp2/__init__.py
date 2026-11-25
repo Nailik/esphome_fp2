@@ -65,12 +65,16 @@ FORGET_MAP_BUTTONS = {
     "forget_edge_map_button": (1, "mdi:border-none-variant"),
 }
 
-FP2MotionNumber = aqara_fp2_ns.class_("FP2MotionNumber", number.Number, cg.Component)
+FP2TunableNumber = aqara_fp2_ns.class_("FP2TunableNumber", number.Number, cg.Component)
 # key -> (Kind, default, min, max, step, unit, icon); Kind must match
-# FP2MotionNumber::Kind in fp2_component.h
-MOTION_NUMBERS = {
+# FP2TunableNumber::Kind in fp2_component.h
+TUNABLE_NUMBERS = {
     "motion_timeout": (0, 5.0, 1.0, 600.0, 1.0, "s", "mdi:timer-outline"),
     "motion_distance": (1, 20.0, 5.0, 200.0, 5.0, "cm", "mdi:ruler"),
+    # Added to the radar's reported temperature. The radar reports its die
+    # temperature, which runs well above the room; the correction depends on
+    # the enclosure, so it is tunable at runtime and kept in flash.
+    "temperature_offset": (2, 0.0, -50.0, 50.0, 0.5, UNIT_CELSIUS, "mdi:thermometer-minus"),
 }
 
 FP2Zone = aqara_fp2_ns.class_("FP2Zone", cg.Component)
@@ -119,6 +123,7 @@ CONF_TARGET_TRACKING = "target_tracking"
 CONF_LOCATION_REPORT_SWITCH = "location_report_switch"
 CONF_OPERATING_MODE = "operating_mode"
 CONF_RADAR_TEMPERATURE = "radar_temperature"
+CONF_INITIAL_VALUE = "initial_value"
 CONF_REALTIME_PEOPLE_NUMBER = "realtime_people_number"
 CONF_ONTIME_PEOPLE_NUMBER = "ontime_people_number"
 CONF_REALTIME_PEOPLE_COUNTING = "realtime_people_counting"
@@ -332,12 +337,18 @@ CONFIG_SCHEMA = (
             },
             **{
                 cv.Optional(key): number.number_schema(
-                    FP2MotionNumber,
+                    FP2TunableNumber,
                     unit_of_measurement=unit,
                     icon=icon,
                     entity_category=ENTITY_CATEGORY_CONFIG,
+                ).extend(
+                    {
+                        cv.Optional(CONF_INITIAL_VALUE, default=default): cv.float_range(
+                            min=lo, max=hi
+                        )
+                    }
                 )
-                for key, (_, _, _, _, _, unit, icon) in MOTION_NUMBERS.items()
+                for key, (_, default, lo, hi, _, unit, icon) in TUNABLE_NUMBERS.items()
             },
 
             cv.Optional("edge_label_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
@@ -371,7 +382,10 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_RADAR_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement=UNIT_CELSIUS,
                 icon=ICON_THERMOMETER,
-                accuracy_decimals=0,
+                # 1, not 0: temperature_offset has a 0.5 step, and at 0
+                # decimals Home Assistant rounds -15.5 and -15.0 to the same
+                # whole degree, so half the offset range was unobservable.
+                accuracy_decimals=1,
                 device_class=DEVICE_CLASS_TEMPERATURE,
                 state_class=STATE_CLASS_MEASUREMENT,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -593,13 +607,13 @@ async def to_code(config):
             btn = await button.new_button(config[key])
             cg.add(btn.set_parent(var, kind))
 
-    for key, (kind, default, lo, hi, step, _, _) in MOTION_NUMBERS.items():
+    for key, (kind, _, lo, hi, step, _, _) in TUNABLE_NUMBERS.items():
         if key in config:
             num = await number.new_number(
                 config[key], min_value=lo, max_value=hi, step=step
             )
             await cg.register_component(num, config[key])
-            cg.add(num.set_parent(var, kind, default))
+            cg.add(num.set_parent(var, kind, config[key][CONF_INITIAL_VALUE]))
 
     # Generate map config JSON data at compile time
     map_config_data = {

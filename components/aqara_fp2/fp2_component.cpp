@@ -262,6 +262,9 @@ void FP2Component::perform_reset_() {
   learn_started_ms_[MAP_EDGE] = 0;
   last_radar_frame_millis_ = 0;
   last_heartbeat_millis_ = 0;
+  // The cached reading belongs to the episode that is ending. Keeping it would
+  // let the next offset change re-publish a pre-reset temperature as current.
+  has_raw_temperature_ = false;
 
   if (reset_pin_ != nullptr) {
     ESP_LOGI(TAG, "Performing Hardware Reset via Pin...");
@@ -1564,26 +1567,52 @@ void FP2Component::save_zone_from_editor(uint8_t zone_id, uint8_t sensitivity, i
   this->save_zone_to_sensor(zone_id, hex, sensitivity, zone_type);
 }
 
-void FP2MotionNumber::setup() {
+void FP2TunableNumber::setup() {
   this->pref_ = global_preferences->make_preference<float>(this->get_object_id_hash());
   float value = this->initial_;
   float saved;
-  if (this->pref_.load(&saved) && std::isfinite(saved) && saved > 0)
-    value = saved;
+  // No > 0 guard: TEMPERATURE_OFFSET is routinely negative. A value that
+  // reached flash came from control() and so was in range for the build that
+  // wrote it - but not necessarily for this one, because the YAML may since
+  // have narrowed min/max. Clamp, or the entity publishes (and applies) a
+  // state outside the range it declares.
+  if (this->pref_.load(&saved) && std::isfinite(saved)) {
+    const float lo = this->traits.get_min_value();
+    const float hi = this->traits.get_max_value();
+    value = saved < lo ? lo : (saved > hi ? hi : saved);
+    if (value != saved) {
+      ESP_LOGW(TAG, "Restored value %.2f is outside [%.2f, %.2f] - clamped to %.2f", saved, lo, hi,
+               value);
+    }
+  }
   this->apply_(value);
 }
 
-void FP2MotionNumber::control(float value) {
+void FP2TunableNumber::control(float value) {
   this->apply_(value);
   this->pref_.save(&value);
+  // save() only queues the write on ESP32; without this the value is lost if
+  // the device loses power before the preferences syncer next runs. Same
+  // durability fix as the zone/global overrides elsewhere in this file.
+  global_preferences->sync();
 }
 
-void FP2MotionNumber::apply_(float value) {
+void FP2TunableNumber::apply_(float value) {
   if (this->parent_ != nullptr) {
-    if (this->kind_ == DISTANCE)
-      this->parent_->set_motion_distance_cm(value);
-    else
-      this->parent_->set_motion_timeout_s(value);
+    switch (this->kind_) {
+      case DISTANCE:
+        this->parent_->set_motion_distance_cm(value);
+        break;
+      case TEMPERATURE_OFFSET:
+        // Re-publishes the last reading with the new offset; the radar's
+        // temperature is read once per init, so without that the entity would
+        // keep its pre-offset value until the next reboot.
+        this->parent_->set_temperature_offset(value);
+        break;
+      default:
+        this->parent_->set_motion_timeout_s(value);
+        break;
+    }
   }
   this->publish_state(value);
 }
@@ -2985,10 +3014,15 @@ void FP2Component::publish_empty_targets_() {
 void FP2Component::handle_temperature_report_(const std::vector<uint8_t> &payload) {
     if (payload.size() == 5 && payload[2] == 0x01) {
         uint16_t temp = payload[3] << 8 | payload[4];
+        // Kept so set_temperature_offset() can re-publish without waiting for
+        // another report: TEMPERATURE is read once per init and the radar does
+        // not send it unsolicited.
+        last_raw_temperature_ = temp;
+        has_raw_temperature_ = true;
         if (radar_temperature_sensor_ != nullptr) {
-            radar_temperature_sensor_->publish_state(temp);
+            radar_temperature_sensor_->publish_state(temp + temperature_offset_);
         }
-        ESP_LOGD(TAG, "Radar temperature report: %d", temp);
+        ESP_LOGD(TAG, "Radar temperature report: %d (offset %+.1f)", temp, temperature_offset_);
     } else {
         ESP_LOGD(TAG, "Unexpected radar temperature report format");
     }

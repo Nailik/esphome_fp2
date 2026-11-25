@@ -132,6 +132,7 @@ Optional entities decoded from simple firmware-confirmed report wrappers:
 | `sleep_event` | `0x0176` | text sensor |
 | `target_posture` | `0x0154` | text sensor |
 | `radar_debug` | `0x0201`, unhandled reports, and command telemetry | diagnostic text sensor |
+| `temperature_offset` | - | number, °C, added to `radar_temperature` before publishing. The radar reports its die temperature, which runs well above the room. Persisted to flash on every change; `initial_value` only applies before anything has been saved. Meant to be set by hand once - an automation writing it on a schedule would wear the flash. |
 | `motion_timeout` | - | number, s, default 5: how long global motion stays on after a target's last step. Persisted to flash. |
 | `motion_distance` | - | number, cm, default 20: how far a target must travel from its reference point to count as moving. Raw target units are 1 cm. Persisted to flash. |
 
