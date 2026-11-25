@@ -145,6 +145,11 @@ firmware 100. Firmware 99 is reported to use ~2.5 cm per unit
 distance reads short; the card accepts a `wall_units_per_cell` override for its own
 drawing, but the component has no equivalent yet.
 
+It is measured from where the unit actually is, which differs per mounting. The two
+corner modes sit at opposite ends of the X range, the same way the `(300 - rawX) / 50`
+grid mapping places them: `left_corner` is grid column 0 at raw X = +300, `right_corner`
+is grid column 14 at raw X = -400. Wall mounting puts the unit at the raw origin.
+
 `mounting_position` defaults to `wall`: units on radar firmware 99 never start tracking in the `left_corner`/`right_corner` modes. Edge and interference maps are always written on init (all-zero when not configured), because the radar keeps the last edge map from the Aqara app in its own flash and ignores targets inside it.
 
 The optional `presence_event` text sensor publishes the `0x0103` presence event (`enter`, `leave`, `left_enter`, `right_leave`, `right_enter`, `left_leave`, `approach`, `away`); global motion turns on for arrivals and off for departures.
