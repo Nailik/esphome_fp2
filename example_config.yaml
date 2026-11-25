@@ -383,6 +383,11 @@ aqara_fp2:
   interference_learning_button: { name: "Learn Interference" }
   edge_learning_button:         { name: "Learn Edge" }
 
+  # Undo a learning run: drop the learned map and go back to the
+  # interference_grid / edge_grid configured above.
+  forget_interference_map_button: { name: "Forget Learned Interference Map" }
+  forget_edge_map_button:         { name: "Forget Learned Edge Map" }
+
   # Global motion is derived from how far targets move (see target_moving_).
   # Both are tunable in Home Assistant and kept in flash.
   motion_timeout:  { name: "Motion Timeout" }

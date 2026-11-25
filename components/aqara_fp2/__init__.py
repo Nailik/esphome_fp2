@@ -55,6 +55,16 @@ LEARN_BUTTONS = {
     "edge_learning_button": ("EDGE_AUTO_ENABLE", "mdi:border-outside"),
 }
 
+FP2ForgetMapButton = aqara_fp2_ns.class_("FP2ForgetMapButton", button.Button)
+
+# Undo a learning run: drop the saved map and restore interference_grid /
+# edge_grid from the YAML. key -> (MapKind, icon); MapKind must match
+# FP2Component::MapKind in fp2_component.h
+FORGET_MAP_BUTTONS = {
+    "forget_interference_map_button": (0, "mdi:school-outline"),
+    "forget_edge_map_button": (1, "mdi:border-none-variant"),
+}
+
 FP2MotionNumber = aqara_fp2_ns.class_("FP2MotionNumber", number.Number, cg.Component)
 # key -> (Kind, default, min, max, step, unit, icon); Kind must match
 # FP2MotionNumber::Kind in fp2_component.h
@@ -315,6 +325,12 @@ CONFIG_SCHEMA = (
                 for key, (_, icon) in LEARN_BUTTONS.items()
             },
             **{
+                cv.Optional(key): button.button_schema(
+                    FP2ForgetMapButton, icon=icon, entity_category=ENTITY_CATEGORY_CONFIG
+                )
+                for key, (_, icon) in FORGET_MAP_BUTTONS.items()
+            },
+            **{
                 cv.Optional(key): number.number_schema(
                     FP2MotionNumber,
                     unit_of_measurement=unit,
@@ -571,6 +587,11 @@ async def to_code(config):
         if key in config:
             btn = await button.new_button(config[key])
             cg.add(btn.set_parent(var, getattr(AttrId, attr)))
+
+    for key, (kind, _) in FORGET_MAP_BUTTONS.items():
+        if key in config:
+            btn = await button.new_button(config[key])
+            cg.add(btn.set_parent(var, kind))
 
     for key, (kind, default, lo, hi, step, _, _) in MOTION_NUMBERS.items():
         if key in config:
