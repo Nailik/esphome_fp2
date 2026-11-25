@@ -1714,9 +1714,9 @@ void FP2Component::check_initialization_() {
         } else {
           zone->has_zone_type = false;
         }
-        if (zone->map_sensor != nullptr) {
-          zone->map_sensor->publish_state(grid_to_hex_card_format(zone->grid));
-        }
+        // No map_sensor publish here: step 6 of this same call publishes every
+        // active zone's map_sensor from zone->grid, which the assignment above
+        // has already replaced with the override.
       }
 
       // a. Send Zone Detect Setting (0x0114)
