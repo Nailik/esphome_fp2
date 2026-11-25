@@ -1359,12 +1359,21 @@ void FP2Component::prune_motion_tracks_(uint32_t now) {
       m.used = false;
 }
 
-void FP2Component::force_motion_off_() {
-  for (auto &m : motion_tracks_)
-    m.used = false;
+// Publishes motion off without touching the tracks. Used where the targets
+// may still be present and only the motion state has expired.
+void FP2Component::publish_motion_off_() {
   if (global_motion_sensor_ != nullptr &&
       (!global_motion_sensor_->has_state() || global_motion_sensor_->state))
     global_motion_sensor_->publish_state(false);
+}
+
+// Publishes motion off AND forgets every track. Only for events that mean the
+// targets themselves are gone or meaningless: global presence going to 0, and
+// a radar reset/re-initialisation.
+void FP2Component::force_motion_off_() {
+  for (auto &m : motion_tracks_)
+    m.used = false;
+  publish_motion_off_();
 }
 
 // The target stream can stop (a lost target, a learning run) with motion left
@@ -1375,7 +1384,12 @@ void FP2Component::check_motion_timeout_() {
   uint32_t now = millis();
   if (now - last_motion_ms_ > motion_timeout_ms_) {
     last_motion_ms_ = 0;
-    force_motion_off_();
+    // Publish only. These tracks belong to targets the radar may still be
+    // reporting, and dropping them would reset each one's reference position
+    // to wherever the target is now - discarding the displacement a slowly
+    // creeping target has built up, so it would have to start accumulating
+    // towards motion_distance from scratch.
+    publish_motion_off_();
   }
 }
 
@@ -2472,9 +2486,28 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
     moving = false;
   if (moving)
     last_motion_ms_ = now;
+
+  // A frame carrying no targets is not evidence that motion stopped. The radar
+  // routinely drops a track for a frame or two mid-walk, and the per-track hold
+  // in target_moving_() cannot bridge that, because with count == 0 there is no
+  // track to consult: moving stays false and this published motion off at
+  // stream rate (10-20 Hz), so the entity flapped off and on again while
+  // somebody was still walking. Hold the published state for motion_timeout_ms_
+  // past the last real movement instead, which is what check_motion_timeout_()
+  // enforces from loop() and what the option documents.
+  //
+  // last_motion_ms_ is deliberately NOT refreshed from a held state, or the
+  // hold would renew itself on every empty frame and motion could never end.
+  // An explicit absence still wins immediately: presence_on == false skips the
+  // hold entirely.
+  bool motion_state = moving;
+  if (!motion_state && presence_on && last_motion_ms_ != 0 &&
+      now - last_motion_ms_ <= motion_timeout_ms_)
+    motion_state = true;
+
   if (global_motion_sensor_ != nullptr &&
-      (!global_motion_sensor_->has_state() || global_motion_sensor_->state != moving))
-    global_motion_sensor_->publish_state(moving);
+      (!global_motion_sensor_->has_state() || global_motion_sensor_->state != motion_state))
+    global_motion_sensor_->publish_state(motion_state);
 
   // Base64 encode the binary data
   std::string base64_str = esphome::base64_encode(binary_data);
