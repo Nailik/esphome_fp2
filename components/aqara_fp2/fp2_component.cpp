@@ -2440,8 +2440,11 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
   // Each target is 14 bytes: id(1), x(2), y(2), z(2), velocity(2), snr(2), classifier(1), posture(1), active(1)
   const std::vector<uint8_t> &binary_data = targets.blob;
 
-  // Corner-mount coordinate scale (PROTOCOL 5.1): X/Y raw span 800 units = 7 m.
-  static constexpr float METERS_PER_UNIT = 7.0f / 800.0f;
+  // Raw target units are 1 cm in both mounting modes: the 14 x 14 cell lattice
+  // is 50 units per 0.5 m cell, i.e. 700 units = 7 m across (measured against
+  // the radar's own zone ids, erinnichols/esphome_fp2). The old 7 m / 800
+  // units made every distance read ~14 % short.
+  static constexpr float METERS_PER_UNIT = 0.01f;
   float nearest = NAN;
   uint8_t valid = 0;
   bool moving = false;
