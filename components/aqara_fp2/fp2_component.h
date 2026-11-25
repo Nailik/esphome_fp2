@@ -959,6 +959,11 @@ protected:
   uint32_t motion_timeout_ms_{5000};
   float motion_distance_cm_{20.0f};
   uint32_t last_motion_ms_{0};
+  // True once the radar has reported global presence (0x0105) since the last
+  // init. Until then global_presence_sensor_ holds only our own post-reset
+  // assumption, which must not gate motion off - see
+  // handle_location_tracking_report_().
+  bool presence_reported_{false};
   bool target_moving_(uint8_t id, int16_t x, int16_t y, uint32_t now);
   void prune_motion_tracks_(uint32_t now);
   void force_motion_off_();

@@ -274,13 +274,17 @@ void FP2Component::set_location_reporting_enabled(bool enabled) {
   this->location_reporting_active_ = enabled;
   this->enqueue_command_(OpCode::WRITE, AttrId::LOCATION_REPORT_ENABLE, enabled);
   if (!enabled) {
-    // Clear the sensor state when location reporting is disabled, and stop the
-    // stale-target watchdog from retracting a list that is already gone.
-    targets_nonempty_ = false;
+    // Retract the list before disarming the watchdog.
+    //
+    // set_has_state(false) only clears a local flag - it pushes nothing to the
+    // API - so a text sensor that last carried targets keeps that value in HA,
+    // and every card reading it goes on drawing a target the radar is no
+    // longer reporting. publish_empty_targets_() sends the explicit empty list
+    // (and clears count/distance with it), which is also what the stale-target
+    // watchdog does; zeroing last_location_report_millis_ afterwards stops
+    // check_target_stale_() retracting a list that is already gone.
+    publish_empty_targets_();
     last_location_report_millis_ = 0;
-    if (this->target_tracking_sensor_ != nullptr) {
-      this->target_tracking_sensor_->set_has_state(false);
-    }
   }
 }
 
@@ -2052,6 +2056,10 @@ void FP2Component::check_initialization_() {
       zone->reset_motion();
     }
 
+    // This false is our own post-reset assumption, not something the radar
+    // reported, so it must not arm the motion presence gate: a person already
+    // present at boot produces no 0x0105 edge to correct it.
+    presence_reported_ = false;
     if (global_presence_sensor_ != nullptr) global_presence_sensor_->publish_state(false);
     last_motion_ms_ = 0;
     force_motion_off_();
@@ -2514,6 +2522,9 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
     case AttrId::PRESENCE_DETECT:
         if (payload.size() == 4 && payload[2]  == 0x00) {
             uint8_t state = payload[3];
+            // The radar has now told us what presence is, so the motion gate
+            // in handle_location_tracking_report_() can trust it.
+            presence_reported_ = true;
             if (global_presence_sensor_ != nullptr) {
               global_presence_sensor_->publish_state(state != 0);
             }
@@ -2732,7 +2743,17 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
 
   // Motion never shows while presence is off: the radar keeps streaming a
   // dropped track for a while after the person has gone.
-  bool presence_on = global_presence_sensor_ == nullptr ||
+  //
+  // The gate applies only once the radar has actually reported presence.
+  // global_presence_sensor_ is published from exactly two places: the
+  // unsolicited 0x0105 report, and the forced false at the end of
+  // check_initialization_(). A read of PRESENCE_DETECT cannot supply it -
+  // handle_response_() is observational and publishes nothing - so if nobody
+  // crosses a presence edge after init (a person already standing in the room
+  // at boot, or a 0x0105 that arrived mid-init and was overwritten by that
+  // forced false) the sensor stays false with no way back, and gating on it
+  // would suppress motion for as long as that person stays.
+  bool presence_on = global_presence_sensor_ == nullptr || !presence_reported_ ||
                      (global_presence_sensor_->has_state() && global_presence_sensor_->state);
   if (!presence_on)
     moving = false;
