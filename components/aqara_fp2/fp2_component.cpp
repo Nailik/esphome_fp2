@@ -239,6 +239,9 @@ void FP2Component::perform_reset_() {
   init_done_ = false;
   last_radar_frame_millis_ = 0;
   last_heartbeat_millis_ = 0;
+  // The cached reading belongs to the episode that is ending. Keeping it would
+  // let the next offset change re-publish a pre-reset temperature as current.
+  has_raw_temperature_ = false;
 
   if (reset_pin_ != nullptr) {
     ESP_LOGI(TAG, "Performing Hardware Reset via Pin...");
