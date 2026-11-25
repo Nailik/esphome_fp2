@@ -812,6 +812,17 @@ protected:
   // sends anything at all; nothing else in the init path retries, so re-pulse
   // the reset pin once this long has passed with no radar traffic.
   static const uint32_t NO_TRAFFIC_RETRY_MS = 10000;
+  // The retry is bounded: the delay doubles each attempt (10s, 20s, 40s, 80s,
+  // 160s) and then stops, so a radar that is never going to answer does not
+  // pulse reset and block the main loop for ever. Cleared whenever traffic is
+  // actually seen - see check_initialization_().
+  static const uint8_t MAX_NO_TRAFFIC_RETRIES = 5;
+  uint8_t no_traffic_retries_{0};
+  bool no_traffic_gave_up_{false};
+  // Set by perform_reset_(): millis() can legitimately be 0, so the retry
+  // cannot use last_reset_millis_ > 0 as its "a reset has happened" test.
+  bool reset_armed_{false};
+  void fail_pending_save_batch_(const std::string &reason);
   static const uint32_t WORK_MODE_REPORT_GRACE_MS = 10000;
   uint32_t last_work_mode_write_millis_{0};
 

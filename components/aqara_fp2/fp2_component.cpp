@@ -235,6 +235,10 @@ void FP2Component::setup() {
 
 void FP2Component::perform_reset_() {
   last_reset_millis_ = millis();
+  // Explicit arming flag rather than testing last_reset_millis_ > 0: millis()
+  // really does return 0 for one millisecond every 49.7 days, and a reset
+  // stamped in that window would otherwise never arm the no-traffic retry.
+  reset_armed_ = true;
   command_queue_.clear();
   waiting_for_ack_attr_id_ = AttrId::INVALID;
   init_done_ = false;
@@ -1493,25 +1497,49 @@ void FP2Component::loop() {
 }
 
 void FP2Component::check_heartbeat_watchdog_() {
-  if (!init_done_ || last_heartbeat_millis_ == 0)
+  if (!init_done_)
     return;
-  if (millis() - last_heartbeat_millis_ > HEARTBEAT_TIMEOUT_MS) {
-    restart_initialization_("heartbeat lost");
+  // Before the first 0x0001 heartbeat there is no heartbeat to measure from,
+  // so fall back to the last frame of any kind. A radar that emits one valid
+  // frame after a reset and then dies before its first heartbeat used to be
+  // covered by neither watchdog: that frame sets last_radar_frame_millis_,
+  // check_initialization_() sets init_done_, and the no-traffic retry above is
+  // then skipped by the init_done_ early-out while this function returned
+  // early on last_heartbeat_millis_ == 0.
+  const bool have_heartbeat = last_heartbeat_millis_ != 0;
+  const uint32_t since_ms = have_heartbeat ? last_heartbeat_millis_ : last_radar_frame_millis_;
+  if (since_ms == 0)
+    return;
+  if (millis() - since_ms > HEARTBEAT_TIMEOUT_MS) {
+    restart_initialization_(have_heartbeat ? "heartbeat lost" : "no heartbeat after first frame");
   }
 }
 
 // Drop everything, reset the radar and let check_initialization_() run again
 // on the next radar frame. Used when the heartbeat stops or when the radar
 // announces a fresh boot (work_mode report) after we already configured it.
+// An open save batch is tracked by pending_save_attr_ids_ and only closed
+// when each queued write ACKs or exhausts MAX_RETRIES in
+// process_command_queue_(). Anything that clears command_queue_ out from under
+// it therefore has to fail the batch explicitly, or save_pending() never goes
+// back to false and the web UI waits on "saving" for ever.
+void FP2Component::fail_pending_save_batch_(const std::string &reason) {
+  if (pending_save_attr_ids_.empty())
+    return;
+  save_failed_ = true;
+  save_error_ = reason;
+  pending_save_attr_ids_.clear();
+  save_batch_in_progress_ = false;
+}
+
 void FP2Component::restart_initialization_(const char *reason) {
   ESP_LOGW(TAG, "Radar re-initialization (%s)", reason);
+  // The radar has been talking up to now, so the no-traffic retry sequence
+  // starts fresh for this new episode.
+  no_traffic_retries_ = 0;
+  no_traffic_gave_up_ = false;
   // The queued writes are dropped below, so an open save batch can't finish.
-  if (!pending_save_attr_ids_.empty()) {
-    save_failed_ = true;
-    save_error_ = std::string("radar re-initialized (") + reason + ")";
-    pending_save_attr_ids_.clear();
-    save_batch_in_progress_ = false;
-  }
+  fail_pending_save_batch_(std::string("radar re-initialized (") + reason + ")");
   // The radar comes back in its default work mode; init writes Zone Detection.
   sleep_mode_active_ = false;
   if (this->operating_mode_select_ != nullptr) {
@@ -1584,16 +1612,47 @@ void FP2Component::check_initialization_() {
   // Nothing at all from the radar since the reset: pulse the reset pin again.
   // Without this a soft reboot that leaves the radar silent stays silent until
   // the host is power-cycled by hand.
-  if (last_radar_frame_millis_ == 0 && reset_pin_ != nullptr && last_reset_millis_ > 0 &&
-      millis() - last_reset_millis_ > NO_TRAFFIC_RETRY_MS) {
-    ESP_LOGW(TAG, "No radar traffic %lums after reset, resetting the radar again",
-             (unsigned long) (millis() - last_reset_millis_));
-    perform_reset_();
-    return;
+  //
+  // Bounded, with exponential backoff. perform_reset_() blocks the main loop
+  // for 100ms and re-arms this same gate, so an unbounded retry would pulse
+  // the reset pin, log a warning and stall the loop every 10s for the rest of
+  // the device's uptime whenever the radar is simply not going to answer -
+  // module absent, UART wired to the wrong pins, wrong baud rate, every frame
+  // failing CRC. Back off 10s, 20s, 40s, 80s, 160s and then stop, logging the
+  // reason once. Something that has actually seen traffic re-arms the
+  // sequence: a successful init below, or restart_initialization_().
+  if (last_radar_frame_millis_ == 0 && reset_pin_ != nullptr && reset_armed_) {
+    if (no_traffic_retries_ < MAX_NO_TRAFFIC_RETRIES) {
+      const uint32_t backoff_ms = NO_TRAFFIC_RETRY_MS << no_traffic_retries_;
+      if (millis() - last_reset_millis_ > backoff_ms) {
+        no_traffic_retries_++;
+        ESP_LOGW(TAG,
+                 "No radar traffic %lums after reset (attempt %u of %u), resetting the radar again",
+                 (unsigned long) (millis() - last_reset_millis_),
+                 (unsigned) no_traffic_retries_, (unsigned) MAX_NO_TRAFFIC_RETRIES);
+        // perform_reset_() drops the command queue, so a save batch that is
+        // still waiting for an ACK could never finish or time out, and
+        // save_pending() would stay true for ever. Fail it here, exactly as
+        // restart_initialization_() does for the same reason.
+        fail_pending_save_batch_("radar did not respond after reset");
+        perform_reset_();
+        return;
+      }
+    } else if (!no_traffic_gave_up_) {
+      no_traffic_gave_up_ = true;
+      ESP_LOGE(TAG,
+               "Radar still silent after %u reset attempts - giving up. Check the UART wiring, "
+               "the baud rate and the reset pin.",
+               (unsigned) MAX_NO_TRAFFIC_RETRIES);
+    }
   }
 
   if (last_radar_frame_millis_ > 0) {
     ESP_LOGI(TAG, "Radar traffic received. Starting initialization sequence...");
+    // The radar is talking, so a later silent spell starts its retry sequence
+    // from the shortest backoff again.
+    no_traffic_retries_ = 0;
+    no_traffic_gave_up_ = false;
     init_done_ = true;
 
     // 0. Like the stock firmware: tell the radar how it is mounted and read
