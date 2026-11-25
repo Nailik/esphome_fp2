@@ -438,6 +438,12 @@ public:
   void set_motion_timeout_s(float s) { motion_timeout_ms_ = (uint32_t) (s * 1000.0f); }
   void set_motion_distance_cm(float cm) { motion_distance_cm_ = cm; }
   void set_mounting_position(uint8_t pos) { mounting_position_ = pos; }
+  // Raw X of the sensor itself: 0x02/0x03 are the two corner mountings, where
+  // the unit sits at raw X = +300 (grid column 0); wall mounting puts it at
+  // the raw origin. Used to measure target distance from the right point.
+  float corner_mounted_sensor_raw_x_() const {
+    return (mounting_position_ == 0x02 || mounting_position_ == 0x03) ? 300.0f : 0.0f;
+  }
   void set_left_right_reverse(bool val) { left_right_reverse_ = val; }
   void set_proximity(uint8_t val) { proximity_ = val; }
   // Stale-target watchdog: 0 disables it, otherwise the longest gap in the

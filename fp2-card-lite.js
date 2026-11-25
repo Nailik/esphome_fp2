@@ -28,8 +28,10 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 function targetToGridXY(rawX, rawY, mountingPosition) {
   if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return { gridX: 0, gridY: 0 };
   if (mountingPosition === "left_upper_corner" || mountingPosition === "right_upper_corner") {
-    const gridX = (300 - rawX) / 50.0;
-    return { gridX: gridX > GRID ? GRID : gridX, gridY: rawY / 50.0 };
+    // Clamp both axes - see card.js: gridY was unclamped, so a target past
+    // 7 m vanished instead of being drawn at the far edge.
+    const clampCell = (v) => (v < 0 ? 0 : v > GRID ? GRID : v);
+    return { gridX: clampCell((300 - rawX) / 50.0), gridY: clampCell(rawY / 50.0) };
   }
   // Wall mode: unverified placeholder, same as card.js.
   return { gridX: rawX * 0.01, gridY: rawY * 0.01 };

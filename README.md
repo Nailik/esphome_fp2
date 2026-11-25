@@ -89,6 +89,7 @@ The ESPHome component exposes several SubIDs found in the stock firmware dump. D
 | `fall_detection_sensitivity` | `0x0123` | `low` | `low`, `medium`, or `high`. Written on every init, like stock. |
 | `interference_learning_button` | `0x0139` | unset | Optional button: starts one interference-learning run on the radar (the Aqara app's "AI learning"). A trigger, not a state - never written at init. |
 | `edge_learning_button` | `0x0150` | unset | Optional button: starts one room-edge learning run. Same trigger semantics. |
+| `target_timeout` | - | `8s` | How long a non-empty target list may go unrefreshed before it is retracted and an explicit empty list is published. The radar does not reliably close out a track with a final `count=0` frame, so without this a card keeps drawing somebody at the door. `0s` disables the watchdog. |
 
 A map the radar learns itself (0x0110 interference, 0x0107 edge) is reported
 back when the run finishes. That learned map becomes the live map: it is saved
@@ -96,6 +97,12 @@ to its own NVS blob, shown on the card, and written back to the radar on the
 next boot in place of the compiled `interference_grid` / `edge_grid`. Removing
 the saved map means erasing NVS (or reflashing with `esphome clean`); editing
 `interference_grid` in YAML no longer wins once the radar has learned one.
+
+`nearest_distance` assumes 1 cm per raw target unit, which is measured correct on radar
+firmware 100. Firmware 99 is reported to use ~2.5 cm per unit
+([nzzane/esphome_fp2](https://github.com/nzzane/esphome_fp2)), so on FW 99 the published
+distance reads short; the card accepts a `wall_units_per_cell` override for its own
+drawing, but the component has no equivalent yet.
 
 `mounting_position` defaults to `wall`: units on radar firmware 99 never start tracking in the `left_corner`/`right_corner` modes. Edge and interference maps are always written on init (all-zero when not configured), because the radar keeps the last edge map from the Aqara app in its own flash and ignores targets inside it.
 

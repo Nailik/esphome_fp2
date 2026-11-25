@@ -184,8 +184,14 @@ window.FP2Geometry = (function () {
       // units = 7 m. The earlier (-rawX + 400) / 800 * 14 lattice assumed 57
       // units per cell and drifted by up to a cell and a half across the room
       // (measured against the radar's own zone ids, erinnichols/esphome_fp2).
-      const gridX = (300 - rawX) / 50.0;
-      return { gridX: gridX > 14.0 ? 14.0 : gridX, gridY: rawY / 50.0 };
+      // Clamp both axes onto the lattice. gridY was unclamped, so a target
+      // past 7 m - rawY = 750 is still within the FP2's range - gave gridY 15
+      // and the dot silently vanished instead of being drawn at the far edge.
+      // The gridX clamp was also one-sided and never fired: (300 - -400) / 50
+      // is exactly 14.0, while rawX > +300 produced a negative gridX that
+      // downstream range checks dropped.
+      const clampCell = (v) => (v < 0 ? 0 : v > 14.0 ? 14.0 : v);
+      return { gridX: clampCell((300 - rawX) / 50.0), gridY: clampCell(rawY / 50.0) };
     }    
     // Wall mounting: sensor at top-center (column 7), 0.5 m cells, +X = viewer's left.
     // Units per cell depend on radar firmware: ~50 on FW 100 (1 cm/unit, measured),
