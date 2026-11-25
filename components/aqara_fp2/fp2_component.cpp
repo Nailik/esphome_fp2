@@ -181,6 +181,10 @@ void FP2Component::setup() {
   // zones_ set (compile-time + rehydrated runtime) on the very first pass.
   rehydrate_zone_registry_();
 
+  // A map the radar learned itself replaces the compiled one, before
+  // check_initialization_() writes the maps back to the radar.
+  apply_map_overrides_();
+
   // CR-01 fix (12-REVIEW iter2): fix zones_'s backing storage now, before the
   // web-handler registration block below can ever let the httpd task start
   // reading it concurrently. 32 is the protocol's hard ceiling on zone IDs
@@ -237,6 +241,9 @@ void FP2Component::perform_reset_() {
   command_queue_.clear();
   waiting_for_ack_attr_id_ = AttrId::INVALID;
   init_done_ = false;
+  // A learning run cannot survive the radar being reset under it.
+  learn_pending_[MAP_INTERFERENCE] = false;
+  learn_pending_[MAP_EDGE] = false;
   last_radar_frame_millis_ = 0;
   last_heartbeat_millis_ = 0;
 
@@ -451,6 +458,31 @@ void FP2Component::set_interference_auto_enabled(bool enabled) {
   enqueue_command_(OpCode::WRITE, AttrId::INTERFERENCE_AUTO_ENABLE, enabled);
 }
 
+void FP2LearnButton::press_action() {
+  if (this->parent_ != nullptr)
+    this->parent_->trigger_learning(this->attr_);
+}
+
+void FP2Component::trigger_learning(AttrId attr) {
+  if (!init_done_) {
+    ESP_LOGW(TAG, "Learning 0x%04X ignored: radar not initialised yet", (uint16_t) attr);
+    return;
+  }
+  const uint8_t kind = attr == AttrId::INTERFERENCE_AUTO_ENABLE ? MAP_INTERFERENCE : MAP_EDGE;
+  // Each press queues a WRITE the radar has to ACK, so repeated taps would
+  // queue N redundant enables. One run at a time is enough.
+  if (learn_pending_[kind]) {
+    ESP_LOGW(TAG, "Learning 0x%04X is already running - ignoring the repeat press",
+             (uint16_t) attr);
+    return;
+  }
+  // Marks this run as ours: only a report that answers a run we started may
+  // replace the configured map - see handle_learned_map_report_().
+  learn_pending_[kind] = true;
+  ESP_LOGI(TAG, "Learning 0x%04X started", (uint16_t) attr);
+  enqueue_command_(OpCode::WRITE, attr, true);
+}
+
 // RUN-02/RUN-04 (09-03): NVS override load/save helpers using ESPHome's
 // standard global_preferences->make_preference<T>(fnv1_hash(...)) mechanism
 // (09-RESEARCH.md Pattern 4, Don't Hand-Roll) - not raw NVS/SPIFFS, not a
@@ -519,6 +551,153 @@ void FP2Component::save_zone_name_(uint8_t zone_id, const char *name) {
   // Finding 3 (12-01) - do not omit: a name write is not durable until this
   // sync() flushes it to flash.
   global_preferences->sync();
+}
+
+static const char *map_kind_name(uint8_t kind) { return kind == 0 ? "interference" : "edge"; }
+
+static const char *map_override_key(uint8_t kind) {
+  return kind == 0 ? "fp2_map_override_interference" : "fp2_map_override_edge";
+}
+
+bool FP2Component::load_map_override_(uint8_t kind, FP2MapOverride *out) {
+  auto pref = global_preferences->make_preference<FP2MapOverride>(fnv1_hash(map_override_key(kind)));
+  return pref.load(out) && out->version == FP2_MAP_OVERRIDE_VERSION;
+}
+
+void FP2Component::save_map_override_(uint8_t kind, const GridMap &grid) {
+  // Skip an identical rewrite. sync() below is a blocking, full NVS commit and
+  // this is reached from the UART frame path in loop(), so re-committing a map
+  // the radar reported unchanged would stall the main loop and wear flash for
+  // no benefit.
+  FP2MapOverride existing;
+  if (load_map_override_(kind, &existing) && existing.grid == grid) {
+    ESP_LOGD(TAG, "Learned %s map is unchanged - not rewriting NVS", map_kind_name(kind));
+    return;
+  }
+  FP2MapOverride ov{FP2_MAP_OVERRIDE_VERSION, grid};
+  auto pref = global_preferences->make_preference<FP2MapOverride>(fnv1_hash(map_override_key(kind)));
+  pref.save(&ov);
+  // Same durability gap as the zone overrides: not persisted until sync().
+  global_preferences->sync();
+}
+
+void FP2Component::apply_map_overrides_() {
+  for (uint8_t kind = MAP_INTERFERENCE; kind <= MAP_EDGE; kind++) {
+    FP2MapOverride ov;
+    if (!load_map_override_(kind, &ov))
+      continue;
+    GridMap &target = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
+    bool &has = kind == MAP_INTERFERENCE ? has_interference_grid_ : has_edge_grid_;
+    target = ov.grid;
+    // An all-zero learned map means "nothing marked" and is still written at
+    // init (both maps are written unconditionally), so has_ can stay false
+    // there without changing what reaches the radar - but the card should show
+    // the learned map either way.
+    has = false;
+    for (auto b : target) {
+      if (b) {
+        has = true;
+        break;
+      }
+    }
+    ESP_LOGI(TAG, "Applying saved learned %s map from NVS (%s)", map_kind_name(kind),
+             has ? "cells set" : "empty");
+    // The grid sensors published the compiled map while the generated setup()
+    // ran, before this component's setup() - replace what they are showing.
+    publish_map_grid_sensor_(kind);
+  }
+}
+
+// The radar reports 0x0110 / 0x0107 back after a learning run (see
+// FP2LearnButton). Keep the learned map as the live one, persist it and show
+// it on the card; otherwise the next boot's map write wipes what was learned.
+void FP2Component::handle_learned_map_report_(AttrId attr_id, const std::vector<uint8_t> &payload) {
+  const uint8_t kind = attr_id == AttrId::INTERFERENCE_MAP ? MAP_INTERFERENCE : MAP_EDGE;
+
+  // Only a learning run this component started may replace the configured
+  // map. Acting on every inbound report would mean one unsolicited frame -
+  // the radar echoing the map it keeps in its own flash after a boot, say -
+  // permanently replaced the YAML interference_grid or edge_grid in NVS on a
+  // device whose learning button was never pressed, with no way back short of
+  // erasing flash.
+  if (!learn_pending_[kind]) {
+    ESP_LOGI(TAG, "Ignoring unsolicited learned %s map report: no learning run pending",
+             map_kind_name(kind));
+    return;
+  }
+
+  // Two framings are seen for this blob: [SubID 2][Type 1 = 0x06][Len 2][40
+  // bytes] = 45 bytes, and the same without the length field = 43. Accept
+  // exactly those two, and when the length field is present require it to say
+  // 40. Taking "the last 40 bytes" of any other frame shifts every row, and
+  // the save below would then make that garbage permanent.
+  size_t map_offset = 0;
+  bool layout_ok = false;
+  if (payload.size() >= 3 && payload[2] == 0x06) {
+    if (payload.size() == 43) {
+      map_offset = 3;
+      layout_ok = true;
+    } else if (payload.size() == 45 &&
+               (((uint16_t) payload[3] << 8) | (uint16_t) payload[4]) == 40) {
+      map_offset = 5;
+      layout_ok = true;
+    }
+  }
+  if (!layout_ok) {
+    ESP_LOGW(TAG, "Learned %s map report malformed (%u bytes, type 0x%02X) - ignored",
+             map_kind_name(kind), static_cast<unsigned>(payload.size()),
+             payload.size() > 2 ? payload[2] : 0);
+    return;
+  }
+
+  learn_pending_[kind] = false;
+
+  GridMap &target = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
+  bool &has = kind == MAP_INTERFERENCE ? has_interference_grid_ : has_edge_grid_;
+  std::copy(payload.begin() + map_offset, payload.begin() + map_offset + 40, target.begin());
+  has = false;
+  for (auto b : target) {
+    if (b) {
+      has = true;
+      break;
+    }
+  }
+  // grid_to_hex_card_format() emits rows 0-13 of the 20 the protocol carries,
+  // so a cell the radar marked in rows 14-19 is stored and written back to the
+  // radar correctly but cannot be shown on the card - and would be dropped if
+  // the user exported YAML from the card. Say so instead of losing it quietly.
+  for (size_t i = 28; i < target.size(); i++) {
+    if (target[i] != 0) {
+      ESP_LOGW(TAG,
+               "Learned %s map marks cells in protocol rows 14-19, which the card format cannot "
+               "show - the full map is still stored and sent to the radar",
+               map_kind_name(kind));
+      break;
+    }
+  }
+  save_map_override_(kind, target);
+  publish_map_grid_sensor_(kind);
+  ESP_LOGI(TAG, "Radar reported a learned %s map (%s), saved", map_kind_name(kind),
+           has ? "cells set" : "empty");
+}
+
+void FP2Component::publish_map_grid_sensor_(uint8_t kind) {
+  text_sensor::TextSensor *sensor =
+      kind == MAP_INTERFERENCE ? interference_grid_sensor_ : edge_label_grid_sensor_;
+  if (sensor == nullptr)
+    return;
+  const GridMap &grid = kind == MAP_INTERFERENCE ? interference_grid_ : edge_grid_;
+  // An all-zero map means "no grid", which is also when json_get_map_data()
+  // omits the key altogether. Publish the empty string rather than 56 zeros so
+  // both surfaces say the same thing; card.js decodes either to an empty grid.
+  bool any_cell = false;
+  for (auto b : grid) {
+    if (b != 0) {
+      any_cell = true;
+      break;
+    }
+  }
+  sensor->publish_state(any_cell ? grid_to_hex_card_format(grid) : std::string());
 }
 
 bool FP2Component::load_global_zone_override_(FP2GlobalZoneOverride *out) {
@@ -2400,6 +2579,12 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
     case AttrId::RESET_ABSENT_STATUS:
       publish_radar_debug_("radar_report", attr_id, payload);
       ESP_LOGI(TAG, "Received reset_absent_status report");
+      break;
+
+    case AttrId::INTERFERENCE_MAP:
+    case AttrId::EDGE_MAP:
+      publish_radar_debug_("learned_map_report", attr_id, payload);
+      handle_learned_map_report_(attr_id, payload);
       break;
 
     default:

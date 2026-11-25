@@ -87,6 +87,15 @@ The ESPHome component exposes several SubIDs found in the stock firmware dump. D
 | `fall_detection` | `0x0121` | unset | Optional fall-detection enable. |
 | `proximity` | `0x0106` | `medium` | `far`, `medium`, or `close` - the approach/away distance ("Proximity" in the Aqara app). Not a hard range cutoff; use `edge_grid` or zones to ignore an area. |
 | `fall_detection_sensitivity` | `0x0123` | `low` | `low`, `medium`, or `high`. Written on every init, like stock. |
+| `interference_learning_button` | `0x0139` | unset | Optional button: starts one interference-learning run on the radar (the Aqara app's "AI learning"). A trigger, not a state - never written at init. |
+| `edge_learning_button` | `0x0150` | unset | Optional button: starts one room-edge learning run. Same trigger semantics. |
+
+A map the radar learns itself (0x0110 interference, 0x0107 edge) is reported
+back when the run finishes. That learned map becomes the live map: it is saved
+to its own NVS blob, shown on the card, and written back to the radar on the
+next boot in place of the compiled `interference_grid` / `edge_grid`. Removing
+the saved map means erasing NVS (or reflashing with `esphome clean`); editing
+`interference_grid` in YAML no longer wins once the radar has learned one.
 
 `mounting_position` defaults to `wall`: units on radar firmware 99 never start tracking in the `left_corner`/`right_corner` modes. Edge and interference maps are always written on init (all-zero when not configured), because the radar keeps the last edge map from the Aqara app in its own flash and ignores targets inside it.
 
