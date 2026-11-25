@@ -6,6 +6,10 @@
 #include "esphome/components/switch/switch.h"
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
+// base64_encode, format_hex and friends moved out of helpers.h; its
+// compatibility include was removed in ESPHome 2026.11.0 as announced,
+// so this one has to be explicit or the build fails on base64_encode.
+#include "esphome/core/alloc_helpers.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
