@@ -18,7 +18,8 @@ void AqaraFP2Accel::update() {
 void AqaraFP2Accel::dump_config() {
   ESP_LOGCONFIG(TAG, "Aqara FP2 Accelerometer:");
   LOG_I2C_DEVICE(this);
-  ESP_LOGCONFIG(TAG, "  Update Interval: %u ms", this->get_update_interval());
+  ESP_LOGCONFIG(TAG, "  Update Interval: %lu ms",
+                static_cast<unsigned long>(this->get_update_interval()));
   ESP_LOGCONFIG(TAG, "  Calibration X: %d", accel_corr_x_);
   ESP_LOGCONFIG(TAG, "  Calibration Y: %d", accel_corr_y_);
   ESP_LOGCONFIG(TAG, "  Calibration Z: %d", accel_corr_z_);
