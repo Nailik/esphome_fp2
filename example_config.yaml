@@ -377,6 +377,11 @@ aqara_fp2:
   interference_learning_button: { name: "Learn Interference" }
   edge_learning_button:         { name: "Learn Edge" }
 
+  # Global motion is derived from how far targets move (see target_moving_).
+  # Both are tunable in Home Assistant and kept in flash.
+  motion_timeout:  { name: "Motion Timeout" }
+  motion_distance: { name: "Motion Distance" }
+
   radar_software_version:
     name: "Radar Software Version"
   radar_temperature:

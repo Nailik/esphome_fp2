@@ -1669,14 +1669,16 @@ static const char ZONES_PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
   importDeviceBtnEl.addEventListener('click', handleImportClick);
   // === Export YAML / Import from Device END ===
 
-  // Ported from card.js's FP2Geometry.targetToGridXY (lines ~173-188): corner
-  // mounts use the verified 7m x 7m transform; wall mount reuses card.js's
-  // own not-yet-verified placeholder (rawX/rawY * 0.01) rather than inventing
-  // a new one here.
+  // Ported from card.js's FP2Geometry.targetToGridXY: keep the two in sync.
+  // Wall mount reuses card.js's own not-yet-verified placeholder
+  // (rawX/rawY * 0.01) rather than inventing a new one here.
   function targetToGridXY(rawX, rawY, mp) {
     if (!isFinite(rawX) || !isFinite(rawY)) return { gridX: 0, gridY: 0 };
     if (mp === 'left_upper_corner' || mp === 'right_upper_corner') {
-      return { gridX: ((-rawX + 400) / 800.0) * 14.0, gridY: (rawY / 800.0) * 14.0 };
+      // 14 x 14 cells of 50 raw units (1 cm per unit): X = +300 is the left
+      // edge, X = -400 the right one where the radar clamps.
+      var gx = (300 - rawX) / 50.0;
+      return { gridX: gx > 14.0 ? 14.0 : gx, gridY: rawY / 50.0 };
     }
     return { gridX: rawX * 0.01, gridY: rawY * 0.01 };
   }

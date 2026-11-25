@@ -23,12 +23,13 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 // --- Geometry (ported verbatim from card.js FP2Geometry) ---
 
-// Raw corner-mount coord space: X in [-400,+400], Y in [0,800]. X=+400 is the
-// left edge, so the leading negation flips it into canvas/grid space where 0=left.
+// Raw corner-mount coord space: 14 x 14 cells of 50 units (1 cm per unit).
+// X = +300 is the left edge, X = -400 the right one where the radar clamps.
 function targetToGridXY(rawX, rawY, mountingPosition) {
   if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return { gridX: 0, gridY: 0 };
   if (mountingPosition === "left_upper_corner" || mountingPosition === "right_upper_corner") {
-    return { gridX: ((-rawX + 400) / 800.0) * GRID, gridY: (rawY / 800.0) * GRID };
+    const gridX = (300 - rawX) / 50.0;
+    return { gridX: gridX > GRID ? GRID : gridX, gridY: rawY / 50.0 };
   }
   // Wall mode: unverified placeholder, same as card.js.
   return { gridX: rawX * 0.01, gridY: rawY * 0.01 };

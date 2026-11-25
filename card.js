@@ -176,11 +176,16 @@ window.FP2Geometry = (function () {
       return { gridX: 0, gridY: 0 };
     }
     if (mountingPosition === "left_upper_corner" || mountingPosition === "right_upper_corner") {
-      // Corner mounting modes: 14x14 grid, 7m x 7m area. Raw X in [-400,+400], Y in [0,800].
-      // Extracted VERBATIM from drawTargets — preserve the leading negation on rawX
-      // (RESEARCH Pattern 5 option a). leftRightReverse is applied separately via
-      // applyGridXMirror, never inside this function.
-      return { gridX: ((-rawX + 400) / 800.0) * 14.0, gridY: (rawY / 800.0) * 14.0 };
+      // leftRightReverse is applied separately via applyGridXMirror, never
+      // inside this function.
+      // Corner mounting: the radar's lattice is 14 x 14 cells of 50 raw units
+      // (1 cm per unit, same scale as wall mode). X = +300 is the left edge and
+      // X = -400 the right one, where the radar clamps, so the span is 700
+      // units = 7 m. The earlier (-rawX + 400) / 800 * 14 lattice assumed 57
+      // units per cell and drifted by up to a cell and a half across the room
+      // (measured against the radar's own zone ids, erinnichols/esphome_fp2).
+      const gridX = (300 - rawX) / 50.0;
+      return { gridX: gridX > 14.0 ? 14.0 : gridX, gridY: rawY / 50.0 };
     }    
     // Wall mounting: sensor at top-center (column 7), 0.5 m cells, +X = viewer's left.
     // Units per cell depend on radar firmware: ~50 on FW 100 (1 cm/unit, measured),

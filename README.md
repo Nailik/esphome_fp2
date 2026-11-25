@@ -117,6 +117,16 @@ Optional entities decoded from simple firmware-confirmed report wrappers:
 | `sleep_event` | `0x0176` | text sensor |
 | `target_posture` | `0x0154` | text sensor |
 | `radar_debug` | `0x0201`, unhandled reports, and command telemetry | diagnostic text sensor |
+| `motion_timeout` | - | number, s, default 5: how long global motion stays on after a target's last step. Persisted to flash. |
+| `motion_distance` | - | number, cm, default 20: how far a target must travel from its reference point to count as moving. Raw target units are 1 cm. Persisted to flash. |
+
+Global motion (`motion`) is derived from how far targets move, not from the
+`0x0102` presence event's arrival/departure parity. The parity answers "did
+someone enter", which never clears by itself - a target that walked in and then
+sat down left motion stuck on. Motion is additionally forced off whenever the
+radar reports presence off, after a radar reset, and `motion_timeout` after the
+target stream stops. Per-zone motion is unchanged: it still comes from the
+radar's own `0x0115` zone-motion reports.
 
 Diagnostic actions exposed in the example config:
 
