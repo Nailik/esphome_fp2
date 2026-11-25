@@ -388,6 +388,10 @@ public:
   void set_mounting_position(uint8_t pos) { mounting_position_ = pos; }
   void set_left_right_reverse(bool val) { left_right_reverse_ = val; }
   void set_proximity(uint8_t val) { proximity_ = val; }
+  // Stale-target watchdog: 0 disables it, otherwise the longest gap in the
+  // 0x0117 stream we accept before declaring the last published target list
+  // dead. See check_target_stale_().
+  void set_target_timeout(uint32_t ms) { target_timeout_ms_ = ms; }
 
   void set_fall_detection(bool val) {
     fall_detection_enabled_ = val;
@@ -704,6 +708,8 @@ protected:
   void handle_ack_(AttrId attr_id);
   void handle_report_(AttrId attr_id, const std::vector<uint8_t> &payload);
   void handle_location_tracking_report_(const std::vector<uint8_t> &payload);
+  void check_target_stale_();
+  void publish_empty_targets_();
   void handle_temperature_report_(const std::vector<uint8_t> &payload);
   void handle_debug_log_report_(const std::vector<uint8_t> &payload);
   void handle_simple_uint32_report_(const std::vector<uint8_t> &payload,
@@ -834,6 +840,13 @@ protected:
   uint32_t last_location_debug_millis_{0};
   uint8_t last_location_target_count_{0xFF};
   uint8_t last_published_target_count_{0xFF};
+  // Stale-target watchdog state. The radar can stop streaming 0x0117 without
+  // ever sending a final count=0 frame, which leaves the last non-empty target
+  // list latched in HA forever (a person frozen on the map at the spot where
+  // they left the room). Timestamp the stream and retract it ourselves.
+  uint32_t last_location_report_millis_{0};
+  uint32_t target_timeout_ms_{8000};
+  bool targets_nonempty_{false};
   uint32_t last_nearest_distance_publish_millis_{0};
 
   // Grid text sensors

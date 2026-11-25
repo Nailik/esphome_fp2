@@ -259,9 +259,14 @@ void FP2Component::perform_reset_() {
 void FP2Component::set_location_reporting_enabled(bool enabled) {
   this->location_reporting_active_ = enabled;
   this->enqueue_command_(OpCode::WRITE, AttrId::LOCATION_REPORT_ENABLE, enabled);
-  if (!enabled && this->target_tracking_sensor_ != nullptr) {
-    // Clear the sensor state when location reporting is disabled
-    this->target_tracking_sensor_->set_has_state(false);
+  if (!enabled) {
+    // Clear the sensor state when location reporting is disabled, and stop the
+    // stale-target watchdog from retracting a list that is already gone.
+    targets_nonempty_ = false;
+    last_location_report_millis_ = 0;
+    if (this->target_tracking_sensor_ != nullptr) {
+      this->target_tracking_sensor_->set_has_state(false);
+    }
   }
 }
 
@@ -1381,6 +1386,7 @@ void FP2Component::loop() {
 
   check_initialization_();
   check_heartbeat_watchdog_();
+  check_target_stale_();
   process_command_queue_();
 
   // Release zone motion sensors once their debounce timeout expires.
@@ -1703,6 +1709,9 @@ void FP2Component::check_initialization_() {
     if (target_tracking_sensor_ != nullptr) {
       target_tracking_sensor_->set_has_state(false);
     }
+    // The stream restarts from scratch; nothing left to retract.
+    targets_nonempty_ = false;
+    last_location_report_millis_ = 0;
   }
 }
 
@@ -2320,6 +2329,10 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
 
   const uint8_t count = targets.count;
   uint32_t now = millis();
+  // Feed the stale-target watchdog (check_target_stale_()): every accepted
+  // frame, empty or not, proves the stream is alive.
+  last_location_report_millis_ = now;
+  targets_nonempty_ = count > 0;
   if (count != last_location_target_count_ || now - last_location_debug_millis_ > 5000) {
     ESP_LOGD(TAG, "Location tracking report: targets=%u payload_len=%u",
              count, static_cast<unsigned>(payload.size()));
@@ -2373,6 +2386,59 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
   if (nearest_distance_sensor_ != nullptr && now - last_nearest_distance_publish_millis_ >= 1000) {
     last_nearest_distance_publish_millis_ = now;
     nearest_distance_sensor_->publish_state(nearest);  // NAN -> unknown when no targets
+  }
+}
+
+// Retract a target list the radar has stopped refreshing.
+//
+// The radar does not reliably close out a track with a final count=0 frame:
+// when a target is lost - typically right after someone walks out through the
+// exit area - the 0x0117 stream can simply stop while the last frame still
+// carries that target. A text sensor latches its last value, so HA (and every
+// card reading it) keeps drawing a person standing at the door until something
+// else re-triggers the stream. Publishing an explicit empty list after
+// target_timeout_ms_ of silence bounds that to a known, configurable delay.
+//
+// Only a non-empty list needs retracting; an already-empty one is correct.
+void FP2Component::check_target_stale_() {
+  if (target_timeout_ms_ == 0 || !targets_nonempty_ || !location_reporting_active_)
+    return;
+  if (last_location_report_millis_ == 0)
+    return;
+  if (millis() - last_location_report_millis_ < target_timeout_ms_)
+    return;
+
+  ESP_LOGW(TAG, "No location report for %ums - clearing %u stale target(s)",
+           (unsigned) target_timeout_ms_, (unsigned) last_location_target_count_);
+  publish_empty_targets_();
+}
+
+// Publish the wire form of "no targets": a single count byte of 0, matching
+// what handle_location_tracking_report_() would emit for an empty frame, so
+// consumers need no special case.
+void FP2Component::publish_empty_targets_() {
+  targets_nonempty_ = false;
+  last_location_target_count_ = 0;
+
+  const std::vector<uint8_t> empty_blob{0x00};
+  const std::string base64_str = esphome::base64_encode(empty_blob);
+
+  if (this->target_tracking_sensor_ != nullptr) {
+    this->target_tracking_sensor_->publish_state(base64_str);
+  }
+
+#ifdef AQARA_FP2_HAS_DEVICE_WEBUI
+  if (this->zone_editor_sse_ != nullptr) {
+    this->zone_editor_sse_->try_send_nodefer(base64_str.c_str(), base64_str.size(), "target_update");
+  }
+#endif
+
+  if (target_count_sensor_ != nullptr && target_count_changed(0, &last_published_target_count_)) {
+    target_count_sensor_->publish_state(0);
+  }
+  if (nearest_distance_sensor_ != nullptr) {
+    last_nearest_distance_publish_millis_ = millis();
+    nearest_distance_sensor_->publish_state(NAN);
   }
 }
 
